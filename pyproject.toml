@@ -1,0 +1,26 @@
+[project]
+name = "ai-video-summary"
+version = "0.1.0"
+description = "A video-to-technical-blog automation pipeline."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+    "openai>=1.0.0",
+    "pydantic>=2.0.0",
+    "tenacity>=8.0.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+local-whisper = [
+    "faster-whisper>=0.10.0",
+]
+
+[project.scripts]
+ai-vsummarize = "ai_video_summary.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

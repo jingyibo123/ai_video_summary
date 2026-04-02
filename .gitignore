@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# Project Specific
+ai_summary/
+samples/
+
+# IDEs
+.vscode/
+.idea/
+.cursor/
