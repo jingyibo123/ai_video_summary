@@ -30,7 +30,14 @@ uv sync --extra local-whisper
 *注：需确保 `ffmpeg` 已安装。*
 
 ### 2. 配置说明
-编辑 `config.yaml` 填入会议背景与 API 密钥：
+
+首先，复制环境配置模板并填入你的 API 密钥：
+```bash
+cp .env.example .env
+```
+（编辑 `.env` 文件，填入 VLM 和 ASR 的 API 地址、模型名称和密钥）
+
+然后，编辑 `context.yaml` 填入会议背景信息：
 ```yaml
 context:
   meeting_title: "英飞凌 MCU 技术培训"

@@ -61,20 +61,20 @@ def main() -> None:
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
             is_slide = list(pool.map(
-                lambda c: agents.vlm_task(config.vlm.base_url, config.vlm.model, "validate", [c['image']]), 
+                lambda c: agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "validate", [c['image']]), 
                 candidates
             ))
         valid = [c for c, m in zip(candidates, is_slide) if m]
         
         deduped = []
         for v in valid:
-            if not deduped or not agents.vlm_task(config.vlm.base_url, config.vlm.model, "dedup", [deduped[-1]['image'], v['image']]):
+            if not deduped or not agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "dedup", [deduped[-1]['image'], v['image']]):
                 deduped.append(v)
             else: deduped[-1]['end_time'] = v['end_time']
                 
         def enrich(s):
-            s["description"] = agents.vlm_task(config.vlm.base_url, config.vlm.model, "caption", [s["image"]])
-            s["keywords"] = agents.vlm_task(config.vlm.base_url, config.vlm.model, "terms", [s["image"]])
+            s["description"] = agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "caption", [s["image"]])
+            s["keywords"] = agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "terms", [s["image"]])
             return s
             
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
@@ -97,6 +97,7 @@ def main() -> None:
             prompt, 
             model_size=config.asr.model_size, 
             api_base=config.asr.api_base,
+            api_key=config.asr.api_key,
             device=config.asr.local_device,
             compute_type=config.asr.local_compute_type
         )
@@ -109,6 +110,7 @@ def main() -> None:
     else:
         final_data = processor.build_final_json(
             config.vlm.base_url, 
+            config.vlm.api_key,
             config.vlm.model, 
             slides_info, 
             transcript, 

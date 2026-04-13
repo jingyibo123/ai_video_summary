@@ -109,7 +109,7 @@ def extract_key_frames(video_path: str, output_dir: str,
 # --- 2. 视觉大模型 (VLM) 代理 ---
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
-def vlm_task(base_url: str, model: str, task_type: str, images: List[str]) -> any:
+def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str]) -> any:
     """
     多功能 VLM 任务处理器，支持幻灯片校验、去重、摘要生成及热词 OCR。
     
@@ -122,7 +122,7 @@ def vlm_task(base_url: str, model: str, task_type: str, images: List[str]) -> an
     Returns:
         any: 校验/去重返回 bool，摘要返回 str，OCR 返回 List[str]。
     """
-    client = OpenAI(api_key="none", base_url=base_url)
+    client = OpenAI(api_key=api_key, base_url=base_url)
     prompts = {
         "validate": "Is this a presentation slide? Return TRUE or FALSE.",
         "dedup": "Are these two images the SAME slide? Return TRUE or FALSE.",
@@ -149,7 +149,7 @@ def vlm_task(base_url: str, model: str, task_type: str, images: List[str]) -> an
 # --- 3. 语音转录 (ASR) 代理 ---
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
-def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "base", api_base: Optional[str] = None, device: str = "cpu", compute_type: str = "int8") -> List[dict]:
+def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "base", api_base: Optional[str] = None, api_key: str = "none", device: str = "cpu", compute_type: str = "int8") -> List[dict]:
     """
     核心语音转录引擎，根据 api_base 自动分发至本地 Faster-Whisper 或远程 API。
     
@@ -165,7 +165,7 @@ def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "bas
         List[dict]: 包含 'start', 'end', 'text', 'speaker' 的分段列表。
     """
     if api_base:
-        client = OpenAI(api_key="none", base_url=api_base)
+        client = OpenAI(api_key=api_key or "none", base_url=api_base)
         with open(audio_path, "rb") as f:
             resp = client.audio.transcriptions.create(model=model_size, file=f, prompt=prompt, response_format="verbose_json")
         raw = getattr(resp, "segments", [])

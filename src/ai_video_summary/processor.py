@@ -27,7 +27,7 @@ class SectionData(BaseModel):
 
 # --- 1. 数据合成 (Data Agent) ---
 
-def build_final_json(base_url: str, model: str, slides: List[dict], transcript: List[dict], context: dict) -> dict:
+def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict) -> dict:
     """
     通过 LLM 聚合跨模态特征（图像描述、关键词、转录文本）生成结构化 JSON。
     
@@ -60,7 +60,7 @@ def build_final_json(base_url: str, model: str, slides: List[dict], transcript: 
         user_info = f"时间: {s['start_time']}s-{s['end_time']}s\n画面: {s.get('description','')}\n原音: {speech or '无语音'}"
         
         try:
-            client = OpenAI(api_key="none", base_url=base_url)
+            client = OpenAI(api_key=api_key or "none", base_url=base_url)
             # 内联 LLM 请求
             resp = client.beta.chat.completions.parse(
                 model=model, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info}],
