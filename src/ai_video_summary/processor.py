@@ -53,30 +53,41 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
     
     sys_prompt = f"你是一名为技术讲座进行深度博文提炼的专家。总议程: [{agenda_str}]。请将以下片段转化为严肃的技术干货章节。"
 
-    def _process_one(i, s):
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
+    def call_llm(user_info_str: str) -> Optional[dict]:
+        client = OpenAI(api_key=api_key or "none", base_url=base_url)
+        resp = client.beta.chat.completions.parse(
+            model=model, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info_str}],
+            response_format=SectionData, temperature=0.3
+        )
+        parsed = getattr(resp.choices[0].message, 'parsed', None)
+        return parsed.model_dump() if parsed else None
+
+    def _process_one(i: int, s: dict) -> dict:
         raw = [seg["text"] for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]
         speech = " ".join(raw)
         if len(speech) > 4000: speech = speech[:4000] + "..."
         user_info = f"时间: {s['start_time']}s-{s['end_time']}s\n画面: {s.get('description','')}\n原音: {speech or '无语音'}"
         
         try:
-            client = OpenAI(api_key=api_key or "none", base_url=base_url)
-            # 内联 LLM 请求
-            resp = client.beta.chat.completions.parse(
-                model=model, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info}],
-                response_format=SectionData, temperature=0.3
-            )
-            node = resp.choices[0].message.parsed.model_dump() if resp.choices[0].message.parsed else None
-        except: node = None
-        
+            node = call_llm(user_info)
+        except Exception as e:
+            logger.error(f"Structured content generation failed: {e}")
+            node = None
+            
         if not node:
-            node = {"agenda_topic": "讲座内容", "section_title": f"分享 {i+1}", "image_caption": s.get('description','图片'), "blog_text": speech or "无内容"}
+            node = SectionData(
+                agenda_topic="讲座内容", 
+                section_title=f"分享 {i+1}", 
+                image_caption=s.get('description','图片'), 
+                blog_text=speech or "无内容"
+            ).model_dump()
             
         node.update({"slide_index": i+1, "image_path": s["image"], "start_time": s["start_time"], "end_time": s["end_time"], 
                      "minutes_content": [seg for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]})
         return node
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         futures = [pool.submit(_process_one, i, s) for i, s in enumerate(slides)]
         final_data["sections"] = [f.result() for f in futures]
     return final_data

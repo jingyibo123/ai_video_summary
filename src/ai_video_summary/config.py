@@ -12,7 +12,7 @@ Pydantic-Settings 自动处理 .env 读取与环境变量映射，
 import os
 import yaml
 from typing import List, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,6 +42,12 @@ class ProjectContext(BaseModel):
     attendees: List[str] = Field(default_factory=list, description="List of attendees")
     agenda: List[str] = Field(default_factory=list, description="Meeting agenda")
     custom_terms: List[str] = Field(default_factory=list, description="Custom terms for ASR prompt")
+
+    @field_validator("attendees", "agenda", "custom_terms", mode="before")
+    @classmethod
+    def _none_to_empty_list(cls, v: object) -> object:
+        """YAML 中全部注释掉的列表会被解析为 None，此处自动转为空列表。"""
+        return v if v is not None else []
 
 
 class AppConfig(BaseSettings):

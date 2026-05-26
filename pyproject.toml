@@ -3,7 +3,7 @@ name = "ai-video-summary"
 version = "0.1.0"
 description = "A video-to-technical-blog automation pipeline."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<=3.12"
 dependencies = [
     "opencv-python>=4.8.0",
     "numpy>=1.24.0",
