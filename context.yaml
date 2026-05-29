@@ -7,27 +7,53 @@
 
 context:
   # 视频/会议标题（用于最终报告标题）
-  meeting_title: ""
+  meeting_title: "英飞凌AURIX微控制器与智能车竞赛培训"
 
   # 活动日期
-  date: ""
+  date: "2026-05-20"
 
   # 地点或平台
-  location: ""
+  location: "直播间"
 
   # 发言人 / 出席者列表
   attendees:
-    # - "主讲人"
-    # - "听众"
+    - "Kobe (英飞凌专家)"
+    - "陈龙 (逐飞科技)"
 
   # 主要议题（前几条会注入 ASR 引导词）
   agenda:
-    # - "第一章：简介"
-    # - "第二章：实践"
+    - "DMA控制器架构与关键特性"
+    - "ASCLIN异步同步接口模块"
+    - "智能车竞赛镜头组入门与基础知识"
 
   # ⚠️ 关键：项目专属技术术语
   # 这些词汇会被注入 ASR initial_prompt，显著减少专业词汇识别错误。
   custom_terms:
-    # - "AURIX"
-    # - "TriCore"
-    # - "DMA"
+    - "AURIX"
+    - "TriCore"
+    - "DMA"
+    - "TCS"
+    - "DMARAM"
+    - "SRI"
+    - "SPB"
+    - "ASCLIN"
+    - "UART"
+    - "LIN"
+    - "SPI"
+    - "QSPI"
+    - "SeekFree"
+    - "逐飞科技"
+    - "码云"
+    - "Gitee"
+    - "英飞凌"
+    - "ADS"
+    - "Move Engine"
+    - "Double buffering"
+    - "linked list"
+    - "Kobe"
+    - "陈龙"
+    - "智能车竞赛"
+    - "ADC"
+    - "Interrupt Router"
+    - "Transaction Control Set"
+    - "Vector"

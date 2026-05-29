@@ -141,6 +141,13 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
             b64 = base64.b64encode(f.read()).decode()
             content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
             
+    task_mapping = {
+        "validate": (SlideValidation, False, lambda p: p.is_slide),
+        "dedup": (SlideDeduplication, False, lambda p: p.is_same),
+        "caption": (SlideCaption, "", lambda p: p.caption),
+        "terms": (VisualVocabulary, [], lambda p: p.items[:20])
+    }
+
     if task_type not in task_mapping:
         raise ValueError(f"Unknown task type: {task_type}")
         
@@ -239,11 +246,11 @@ def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "bas
                 result.append({"start": start, "end": end, "text": sent, "speaker": "讲者"})
             return result
         return [{"start": round(float(s["start"]), 2), "end": round(float(s["end"]), 2), "text": s["text"].strip(), "speaker": "讲者"} for s in raw]
-
-    from faster_whisper import WhisperModel
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    segments, _ = model.transcribe(audio_path, language="zh", initial_prompt=prompt, vad_filter=True)
-    return [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip(), "speaker": "讲者"} for s in segments]
+    else:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        segments, _ = model.transcribe(audio_path, language="zh", initial_prompt=prompt, vad_filter=True)
+        return [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip(), "speaker": "讲者"} for s in segments]
 
 def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] = None) -> None:
     """
