@@ -145,11 +145,6 @@ def main() -> None:
     ts_path = os.path.join(output_dir, "transcript.json")
     if os.path.exists(ts_path):
         transcript = json.load(open(ts_path, 'r', encoding='utf-8'))
-    elif not os.path.exists(aud_path):
-        logger.warning(f"ASR: 未检测到生成的音频文件 {aud_path}。视频可能没有音频流，或者 ffmpeg 提取失败。将跳过 ASR 转录阶段，使用空文本继续。")
-        transcript = []
-        with open(ts_path, 'w', encoding='utf-8') as f:
-            json.dump(transcript, f, ensure_ascii=False, indent=2)
     else:
         vul = []
         for s in slides_info: vul.extend(s.get("keywords") or [])

@@ -152,18 +152,14 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         raise ValueError(f"Unknown task type: {task_type}")
         
     model_class, default_val, extractor = task_mapping[task_type]
-    
-    try:
-        resp = client.beta.chat.completions.parse(
-            model=model, 
-            messages=[{"role": "user", "content": content}], 
-            response_format=model_class
-        )
-        parsed = getattr(resp.choices[0].message, 'parsed', None)
-        return extractor(parsed) if parsed else default_val
-    except Exception as e:
-        logger.error(f"VLM {task_type} failed: {e}")
-        return default_val
+
+    resp = client.beta.chat.completions.parse(
+        model=model,
+        messages=[{"role": "user", "content": content}],
+        response_format=model_class
+    )
+    parsed = getattr(resp.choices[0].message, 'parsed', None)
+    return extractor(parsed) if parsed else default_val
 
 # --- 3. 语音转录 (ASR) 代理 ---
 
