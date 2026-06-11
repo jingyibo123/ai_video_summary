@@ -15,3 +15,7 @@ samples/
 .vscode/
 .idea/
 .cursor/
+
++data/
++uv.lock
++.kilo/

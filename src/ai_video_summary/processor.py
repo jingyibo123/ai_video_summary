@@ -10,7 +10,9 @@
 
 import logging
 import concurrent.futures
-from typing import List, Optional
+import os
+import json
+from typing import List, Optional, Callable
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -27,7 +29,7 @@ class SectionData(BaseModel):
 
 # --- 1. 数据合成 (Data Agent) ---
 
-def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict) -> dict:
+def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None) -> dict:
     """
     通过 LLM 聚合跨模态特征（图像描述、关键词、转录文本）生成结构化 JSON。
     
@@ -53,17 +55,35 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
     
     sys_prompt = f"你是一名为技术讲座进行深度博文提炼的专家。总议程: [{agenda_str}]。请将以下片段转化为严肃的技术干货章节。"
 
+    from .agents import structured_llm_call
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
     def call_llm(user_info_str: str) -> Optional[dict]:
         client = OpenAI(api_key=api_key or "none", base_url=base_url)
-        resp = client.beta.chat.completions.parse(
-            model=model, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info_str}],
-            response_format=SectionData, temperature=0.3
-        )
-        parsed = getattr(resp.choices[0].message, 'parsed', None)
-        return parsed.model_dump() if parsed else None
+        try:
+            parsed, _ = structured_llm_call(
+                client=client,
+                model=model,
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info_str}],
+                model_class=SectionData,
+                supports_parse=supports_parse,
+                supports_response_format=supports_response_format
+            )
+            return parsed.model_dump() if parsed else None
+        except Exception as e:
+            logger.error(f"Structured content generation failed: {e}")
+            raise
 
     def _process_one(i: int, s: dict) -> dict:
+        cache_file = os.path.join(cache_dir, f"section_{i}.json") if cache_dir else None
+        if cache_file and os.path.exists(cache_file):
+            try:
+                node = json.load(open(cache_file, 'r', encoding='utf-8'))
+                if progress_hook: progress_hook()
+                return node
+            except Exception:
+                pass
+                
         raw = [seg["text"] for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]
         speech = " ".join(raw)
         if len(speech) > 4000: speech = speech[:4000] + "..."
@@ -85,9 +105,15 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
             
         node.update({"slide_index": i+1, "image_path": s["image"], "start_time": s["start_time"], "end_time": s["end_time"], 
                      "minutes_content": [seg for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]})
+                     
+        if cache_file:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(node, f, ensure_ascii=False)
+                
+        if progress_hook: progress_hook()
         return node
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [pool.submit(_process_one, i, s) for i, s in enumerate(slides)]
         final_data["sections"] = [f.result() for f in futures]
     return final_data

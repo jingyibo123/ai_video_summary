@@ -1,6 +1,6 @@
 version = 1
 revision = 3
-requires-python = "==3.12"
+requires-python = "==3.12.*"
 
 [[package]]
 name = "ai-video-summary"
@@ -13,6 +13,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "tenacity" },
 ]
 
@@ -30,6 +31,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "rich", specifier = ">=13.0.0" },
     { name = "tenacity", specifier = ">=8.0.0" },
 ]
 provides-extras = ["local-whisper"]

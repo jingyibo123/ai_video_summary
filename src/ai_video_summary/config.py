@@ -20,6 +20,9 @@ class VLMConfig(BaseModel):
     base_url: str = Field(default="http://localhost:1234/v1", description="VLM API base URL")
     model: str = Field(default="qwen2-vl-7b", description="VLM model name")
     api_key: str = Field(default="none", description="VLM API key")
+    supports_parse: bool = Field(default=True, description="Whether the VLM API supports beta.chat.completions.parse")
+    supports_response_format: bool = Field(default=True, description="Whether the VLM API supports response_format={'type': 'json_schema'}")
+    max_workers: int = Field(default=2, description="Max concurrent workers for VLM API requests")
 
 
 class ASRConfig(BaseModel):
@@ -28,6 +31,7 @@ class ASRConfig(BaseModel):
     api_key: str = Field(default="none", description="ASR API key")
     local_device: str = Field(default="cpu", description="Device for local Whisper (cpu/cuda)")
     local_compute_type: str = Field(default="int8", description="Compute type for local Whisper")
+    chunk_length_s: int = Field(default=900, description="Chunk length in seconds for ASR API (to avoid timeouts on long files)")
 
 
 class CVConfig(BaseModel):
