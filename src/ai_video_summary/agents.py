@@ -38,6 +38,11 @@ class SlideDeduplication(BaseModel):
 class SlideCaption(BaseModel):
     caption: str = Field(description="用一句20字内的中文描述此幻灯片内容。")
 
+class SlideAnalysis(BaseModel):
+    is_slide: bool = Field(description="Whether the image is a presentation slide.")
+    caption: Optional[str] = Field(None, description="如果 is_slide 为 true，用一句20字内的中文描述此幻灯片内容。")
+    items: Optional[List[str]] = Field(None, description="如果 is_slide 为 true，提取所有核心技术词汇、组件名或英文缩写。")
+
 # --- 1. 计算机视觉 (CV) 代理 ---
 
 def extract_key_frames(video_path: str, output_dir: str, 
@@ -84,7 +89,8 @@ def extract_key_frames(video_path: str, output_dir: str,
             fname = f"{t_str(current_slide_start_sec)}_{t_str(last_time_sec)}.jpg"
             out_path = os.path.join(cands_dir, fname)
             cv2.imwrite(out_path, last_full_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            results.append({"start_time": current_slide_start_sec, "end_time": last_time_sec, "image": out_path.replace("\\", "/")})
+            rel_path = f"candidates/{fname}"
+            results.append({"start_time": current_slide_start_sec, "end_time": last_time_sec, "image": rel_path})
     
     t_start = time.time()
     success, frame = cap.read()
@@ -131,7 +137,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
                 model=model,
                 messages=messages,
                 response_format=model_class,
-                timeout=180.0,
+                timeout=600.0,
             )
             parsed = resp.choices[0].message.parsed
             reasoning = resp.choices[0].message.reasoning_content
@@ -174,7 +180,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
                         "schema": schema_json
                     }
                 },
-                timeout=180.0,
+                timeout=600.0,
             )
             full_text = resp.choices[0].message.content
             reasoning = resp.choices[0].message.reasoning_content
@@ -190,7 +196,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
             resp = client.chat.completions.create(
                 model=model,
                 messages=new_messages,
-                timeout=180.0,
+                timeout=600.0,
             )
             full_text = resp.choices[0].message.content
             reasoning = resp.choices[0].message.reasoning_content
@@ -222,7 +228,7 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
-        timeout=180.0,       # 180s 超时：27B 模型处理图片推理较慢
+        timeout=600.0,       # 改为 600s: 防止并发队列过长导致排队超时
         max_retries=0,       # 禁用客户端层重试，全部交由 tenacity 统一管控
     )
     prompts = {
@@ -278,6 +284,21 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         "terms": (
             "Extract all technical terms from this slide.\n"
             "Return ONLY a JSON object with no markdown or explanation: {\"items\": [\"term1\", \"term2\", ...]}"
+        ),
+        "analyze": (
+            "Determine if this image is a presentation slide (PPT/Keynote/Google Slides).\n"
+            "Classify as slide (is_slide: true): frames with structured content — "
+            "title/heading, bullet points, numbered lists, charts, diagrams, "
+            "code snippets, tables, clean layout with a consistent background.\n"
+            "Classify as NOT slide (is_slide: false): "
+            "- Webcam video of a speaker\n"
+            "- Conference room camera\n"
+            "- Meeting software UI\n"
+            "- Blank, black, loading or transitioning screens.\n\n"
+            "If is_slide is true, you MUST also provide:\n"
+            "1. 'caption': A brief Chinese description of the slide (under 20 characters).\n"
+            "2. 'items': A list of all technical terms, components, or acronyms found on the slide.\n\n"
+            "Return ONLY a JSON object with no markdown."
         )
     }
     content = [{"type": "text", "text": prompts.get(task_type, task_type)}]
@@ -295,7 +316,8 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         "validate": (SlideValidation, False, lambda p: p.is_slide),
         "dedup": (SlideDeduplication, False, lambda p: p.is_same),
         "caption": (SlideCaption, "", lambda p: p.caption),
-        "terms": (VisualVocabulary, [], lambda p: p.items[:20])
+        "terms": (VisualVocabulary, [], lambda p: p.items[:20]),
+        "analyze": (SlideAnalysis, None, lambda p: (p.is_slide, p.caption or "", (p.items or [])[:20]))
     }
 
     if task_type not in task_mapping:

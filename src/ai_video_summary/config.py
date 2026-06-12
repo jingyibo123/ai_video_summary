@@ -22,7 +22,7 @@ class VLMConfig(BaseModel):
     api_key: str = Field(default="none", description="VLM API key")
     supports_parse: bool = Field(default=True, description="Whether the VLM API supports beta.chat.completions.parse")
     supports_response_format: bool = Field(default=True, description="Whether the VLM API supports response_format={'type': 'json_schema'}")
-    max_workers: int = Field(default=2, description="Max concurrent workers for VLM API requests")
+    max_workers: int = Field(default=1, description="Max concurrent workers for VLM API requests")
 
 
 class ASRConfig(BaseModel):

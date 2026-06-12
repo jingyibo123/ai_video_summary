@@ -98,25 +98,21 @@ def main() -> None:
         if not args.skip_asr:
             agents.extract_audio(args.video, aud_path, max_seconds=max_time)
         
-        # 2. VLM 密集识别（三步：validate → dedup → enrich）
+        # 2. VLM 密集识别（两步：analyze → dedup）
         meta_path = os.path.join(output_dir, "slide_metadata.json")
         vlm_progress_path = os.path.join(output_dir, "vlm_progress.json")
         dedup_path = os.path.join(output_dir, "vlm_deduped.json")
-        enriched_path = os.path.join(output_dir, "vlm_enriched.json")
 
         if (slides_info := _load_json(meta_path)) is not None:
             pass
-        elif (slides_info := _load_json(enriched_path)) is not None:
-            for s in slides_info:
-                s.setdefault("vlm_reasoning", None)
-                s.setdefault("vlm_reasoning_description", None)
-                s.setdefault("vlm_reasoning_terms", None)
-            logger.info(f"VLM: 从 {enriched_path} 恢复了全部进度，跳过VLM步骤")
+        elif (dedup_data := _load_json(dedup_path)) is not None:
+            slides_info = dedup_data.get("slides", dedup_data) if isinstance(dedup_data, dict) else dedup_data
+            logger.info(f"VLM: 从 {dedup_path} 恢复了全部进度，跳过VLM步骤")
         elif args.skip_vlm:
             logger.info("VLM: --skip-vlm 被设置，跳过视觉分析阶段。")
             slides_info = []
         else:
-            # --- Step 1: 验证 ---
+            # --- Step 1: 验证与提炼 ---
             if (candidates := _load_json(vlm_progress_path)) is not None:
                 logger.info(f"VLM: 恢复了 {len(candidates)} 帧的进度")
             else:
@@ -137,16 +133,18 @@ def main() -> None:
 
             unvalidated = [c for c in candidates if "is_slide" not in c]
             if unvalidated:
-                task_val = progress.add_task("[cyan]VLM 验证幻灯片...", total=len(unvalidated))
+                task_val = progress.add_task("[cyan]VLM 分析幻灯片...", total=len(unvalidated))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=config.vlm.max_workers) as pool:
                     futures = {
-                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "validate", [c['image']], config.vlm.supports_parse, config.vlm.supports_response_format): c
+                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "analyze", [os.path.join(output_dir, c['image']) if not os.path.isabs(c['image']) else c['image']], config.vlm.supports_parse, config.vlm.supports_response_format): c
                         for c in unvalidated
                     }
                     completed = 0
                     for future in concurrent.futures.as_completed(futures):
                         c = futures[future]
-                        c["is_slide"], c["vlm_reasoning"] = future.result()
+                        result, reasoning = future.result()
+                        c["is_slide"], c["description"], c["keywords"] = result
+                        c["vlm_reasoning"] = reasoning
                         completed += 1
                         progress.advance(task_val)
                         if completed % 10 == 0:
@@ -155,73 +153,96 @@ def main() -> None:
 
             valid = [c for c in candidates if c.get("is_slide")]
             
-            # --- Step 2: 去重 ---
-            if (dedup_data := _load_json(dedup_path)) is not None:
-                deduped = dedup_data.get("slides", dedup_data) if isinstance(dedup_data, dict) else dedup_data
-                dedup_decisions = dedup_data.get("dedup_decisions", []) if isinstance(dedup_data, dict) else []
-                for s in deduped:
-                    s.setdefault("vlm_reasoning", None)
-                    s.setdefault("vlm_reasoning_description", None)
-                    s.setdefault("vlm_reasoning_terms", None)
+            # --- Step 2: 去重与归并 ---
+            deduped = []
+            dedup_decisions = []
+            
+            if not valid:
+                pass
+            elif len(valid) == 1:
+                deduped.append(valid[0].copy())
             else:
-                deduped = []
-                dedup_decisions = []
-                task_dedup = progress.add_task("[magenta]VLM 去重处理...", total=len(valid))
-                for v in valid:
-                    if not deduped:
-                        deduped.append(v)
+                task_dedup = progress.add_task("[magenta]VLM 并发去重处理...", total=len(valid) - 1)
+                
+                def _dedup_pair(i):
+                    a = valid[i]
+                    b = valid[i+1]
+                    img_a_abs = os.path.join(output_dir, a['image']) if not os.path.isabs(a['image']) else a['image']
+                    img_b_abs = os.path.join(output_dir, b['image']) if not os.path.isabs(b['image']) else b['image']
+                    is_same, dedup_reasoning = agents.vlm_task(
+                        config.vlm.base_url, config.vlm.api_key, config.vlm.model, 
+                        "dedup", [img_a_abs, img_b_abs], 
+                        config.vlm.supports_parse, config.vlm.supports_response_format
+                    )
+                    return i, is_same, dedup_reasoning, a['image'], b['image']
+
+                results_map = {}
+                partial_dedup_path = os.path.join(cache_dir, "vlm_dedup_partial.json")
+                if (partial_saved := _load_json(partial_dedup_path)) is not None:
+                    for k, v in partial_saved.items():
+                        results_map[int(k)] = v
+
+                def _dedup_wrapper(i):
+                    if i in results_map:
+                        return i, results_map[i]["is_same"], results_map[i]["reasoning"], results_map[i]["a"], results_map[i]["b"]
+                    return _dedup_pair(i)
+
+                completed = 0
+                with concurrent.futures.ThreadPoolExecutor(max_workers=config.vlm.max_workers) as pool:
+                    futures = {pool.submit(_dedup_wrapper, i): i for i in range(len(valid) - 1)}
+                    for future in concurrent.futures.as_completed(futures):
+                        i, is_same, reason, img_a, img_b = future.result()
+                        if i not in results_map:
+                            results_map[i] = {
+                                "is_same": is_same,
+                                "reasoning": reason,
+                                "a": img_a,
+                                "b": img_b
+                            }
+                        completed += 1
+                        progress.advance(task_dedup)
+                        if completed % 10 == 0:
+                            _save_json(results_map, partial_dedup_path)
+                _save_json(results_map, partial_dedup_path)
+                
+                # 组装结果
+                groups = []
+                current_group = [valid[0]]
+                for i in range(len(valid) - 1):
+                    decision = results_map[i]
+                    dedup_decisions.append({
+                        "a": decision["a"],
+                        "b": decision["b"],
+                        "is_same": decision["is_same"],
+                        "reasoning": decision["reasoning"]
+                    })
+                    
+                    if decision["is_same"]:
+                        current_group.append(valid[i+1])
                     else:
-                        is_same, dedup_reasoning = agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "dedup", [deduped[-1]['image'], v['image']], config.vlm.supports_parse, config.vlm.supports_response_format)
-                        dedup_decisions.append({
-                            "a": deduped[-1]['image'],
-                            "b": v['image'],
-                            "is_same": is_same,
-                            "reasoning": dedup_reasoning
-                        })
-                        if not is_same:
-                            deduped.append(v)
-                        else:
-                            deduped[-1]['end_time'] = v['end_time']
-                        _save_json(deduped, dedup_path)
-                    progress.advance(task_dedup)
+                        groups.append(current_group)
+                        current_group = [valid[i+1]]
+                groups.append(current_group)
+
+                for g in groups:
+                    rep = g[-1].copy()
+                    rep['start_time'] = g[0]['start_time']
+                    rep['end_time'] = g[-1]['end_time']
+                    
+                    # 把这组连续动画里的所有提取术语做并集，防止中间动画遮挡
+                    merged_keywords = []
+                    for frame in g:
+                        for kw in frame.get("keywords", []):
+                            if kw not in merged_keywords:
+                                merged_keywords.append(kw)
+                    rep['keywords'] = merged_keywords
+                    
+                    deduped.append(rep)
 
                 dedup_data = {"slides": deduped, "dedup_decisions": dedup_decisions}
                 _save_json(dedup_data, dedup_path)
 
-            # --- Step 3: 增强 ---
-            if (slides_info := _load_json(enriched_path)) is not None:
-                for s in slides_info:
-                    s.setdefault("vlm_reasoning", None)
-                    s.setdefault("vlm_reasoning_description", None)
-                    s.setdefault("vlm_reasoning_terms", None)
-            else:
-                def _enrich_task(s):
-                    desc, desc_reasoning = s.get("description"), None
-                    kw, kw_reasoning = s.get("keywords"), None
-                    if not desc:
-                        desc, desc_reasoning = agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "caption", [s["image"]], config.vlm.supports_parse, config.vlm.supports_response_format)
-                    if not kw:
-                        kw, kw_reasoning = agents.vlm_task(config.vlm.base_url, config.vlm.api_key, config.vlm.model, "terms", [s["image"]], config.vlm.supports_parse, config.vlm.supports_response_format)
-                    return desc, kw, desc_reasoning, kw_reasoning
-                
-                task_enrich = progress.add_task("[green]VLM 提炼术语...", total=len(deduped))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=config.vlm.max_workers) as pool:
-                    futures = {pool.submit(_enrich_task, s): s for s in deduped}
-                    completed = 0
-                    for future in concurrent.futures.as_completed(futures):
-                        s = futures[future]
-                        desc, kw, desc_reasoning, kw_reasoning = future.result()
-                        s["description"] = desc
-                        s["vlm_reasoning_description"] = desc_reasoning
-                        s["keywords"] = kw
-                        s["vlm_reasoning_terms"] = kw_reasoning
-                        completed += 1
-                        progress.advance(task_enrich)
-                        if completed % 10 == 0:
-                            _save_json(deduped, enriched_path)
-                    _save_json(deduped, enriched_path)
-
-                slides_info = deduped
+            slides_info = deduped
 
             debug_path = os.path.join(output_dir, "vlm_dedup_debug.json")
             _save_json({
@@ -244,6 +265,21 @@ def main() -> None:
                 "description": "未提取视觉画面", 
                 "keywords": []
             }]
+        
+        # 建立 assets 目录并复制最终保留的图片
+        assets_dir = os.path.join(output_dir, "assets")
+        os.makedirs(assets_dir, exist_ok=True)
+        for s in slides_info:
+            img_path = s.get("image", "")
+            if img_path:
+                img_abs = os.path.join(output_dir, img_path) if not os.path.isabs(img_path) else img_path
+                if os.path.exists(img_abs):
+                    fname = os.path.basename(img_abs)
+                    new_rel = f"assets/{fname}"
+                    new_abs = os.path.join(output_dir, new_rel)
+                    if img_abs != new_abs:
+                        shutil.copyfile(img_abs, new_abs)
+                    s["image"] = new_rel
 
         # 3. ASR
         ts_path = os.path.join(output_dir, "transcript.json")
