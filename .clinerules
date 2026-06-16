@@ -1,0 +1,9 @@
+# AI Agent Rules (.clinerules)
+
+Refer to [AGENTS.md](AGENTS.md) for the universal project context, architecture, and coding standards.
+
+## 🚦 Always-on Quick Rules
+- **Trinity Rule**: Only 3 core modules (`main.py`, `agents.py`, `processor.py`).
+- **Structured Policy**: NO REGEX for LLM/VLM outputs. Use `.parse()` + Pydantic.
+- **ASR Synergy**: VLM-extracted terms must be in ASR prompts.
+- **Type Safety**: PEP 484 hints and Google docstrings are mandatory.

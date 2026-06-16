@@ -8,16 +8,15 @@
 设计哲学：数据语义驱动，解耦底层识别与上层展示。
 """
 
-import logging
 import concurrent.futures
 import os
 import json
 from typing import List, Optional, Callable
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-logger = logging.getLogger(__name__)
+from tenacity import retry
+from loguru import logger
+from .config import dynamic_stop, dynamic_wait
 
 # --- Structured Data Models ---
 
@@ -29,7 +28,7 @@ class SectionData(BaseModel):
 
 # --- 1. 数据合成 (Data Agent) ---
 
-def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None) -> dict:
+def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None, disable_thinking: bool = False) -> dict:
     """
     通过 LLM 聚合跨模态特征（图像描述、关键词、转录文本）生成结构化 JSON。
     
@@ -39,6 +38,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
         slides: 经过 VLM 验证和增强的幻灯片列表。
         transcript: ASR 转录片段列表。
         context: 会议上下文（标题、议程等）。
+        disable_thinking: 是否禁用思考/推理过程。
         
     Returns:
         dict: 完整的结构化会议数据。
@@ -55,11 +55,11 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
     
     sys_prompt = f"你是一名为技术讲座进行深度博文提炼的专家。总议程: [{agenda_str}]。请将以下片段转化为严肃的技术干货章节。"
 
-    from .agents import structured_llm_call
+    from .agents import structured_llm_call, get_openai_client
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
+    @retry(stop=dynamic_stop, wait=dynamic_wait)
     def call_llm(user_info_str: str) -> Optional[dict]:
-        client = OpenAI(api_key=api_key or "none", base_url=base_url)
+        client = get_openai_client(api_key, base_url)
         try:
             parsed, _ = structured_llm_call(
                 client=client,
@@ -67,7 +67,8 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
                 messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_info_str}],
                 model_class=SectionData,
                 supports_parse=supports_parse,
-                supports_response_format=supports_response_format
+                supports_response_format=supports_response_format,
+                disable_thinking=disable_thinking
             )
             return parsed.model_dump() if parsed else None
         except Exception as e:

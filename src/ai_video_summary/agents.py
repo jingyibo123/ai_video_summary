@@ -14,15 +14,31 @@ import re
 import cv2
 import time
 import base64
-import logging
 import subprocess
 import numpy as np
 from typing import List, Optional, Any, Tuple
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry
+from loguru import logger
+from .config import dynamic_stop, dynamic_wait
 
-logger = logging.getLogger(__name__)
+# --- OpenAI Client Cache for Connection Reuse ---
+_client_cache = {}
+
+def get_openai_client(api_key: str, base_url: str) -> OpenAI:
+    """获取或创建 OpenAI 客户端缓存实例，实现连接复用。"""
+    key = (api_key or "none", base_url)
+    if key not in _client_cache:
+        logger.info(f"Creating new OpenAI client instance for base_url={base_url}")
+        _client_cache[key] = OpenAI(
+            api_key=api_key or "none",
+            base_url=base_url,
+            timeout=600.0,       # 改为 600s: 防止并发队列过长导致排队超时
+            max_retries=0,       # 禁用客户端层重试，全部交由 tenacity 统一管控
+        )
+    return _client_cache[key]
+
 
 # --- Pydantic Models for Structured Output ---
 
@@ -129,15 +145,22 @@ def extract_key_frames(video_path: str, output_dir: str,
 
 # --- 2. 视觉大模型 (VLM) 代理 ---
 
-def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_class: Any, supports_parse: bool, supports_response_format: bool) -> Tuple[Any, Optional[str]]:
+def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_class: Any, supports_parse: bool, supports_response_format: bool, disable_thinking: bool = False) -> Tuple[Any, Optional[str]]:
     """统一的结构化 LLM 调用封装（支持 .parse / json_schema / Prompt+Regex 三级降级）"""
+    kwargs = {"timeout": 600.0}
+    if disable_thinking:
+        kwargs["extra_body"] = {
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False
+        }
+
     if supports_parse:
         try:
             resp = client.beta.chat.completions.parse(
                 model=model,
                 messages=messages,
                 response_format=model_class,
-                timeout=600.0,
+                **kwargs,
             )
             parsed = resp.choices[0].message.parsed
             reasoning = resp.choices[0].message.reasoning_content
@@ -180,7 +203,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
                         "schema": schema_json
                     }
                 },
-                timeout=600.0,
+                **kwargs,
             )
             full_text = resp.choices[0].message.content
             reasoning = resp.choices[0].message.reasoning_content
@@ -196,7 +219,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
             resp = client.chat.completions.create(
                 model=model,
                 messages=new_messages,
-                timeout=600.0,
+                **kwargs,
             )
             full_text = resp.choices[0].message.content
             reasoning = resp.choices[0].message.reasoning_content
@@ -209,8 +232,8 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
             raise
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
-def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str], supports_parse: bool = True, supports_response_format: bool = True) -> Tuple[Any, Optional[str]]:
+@retry(stop=dynamic_stop, wait=dynamic_wait)
+def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str], supports_parse: bool = True, supports_response_format: bool = True, disable_thinking: bool = False) -> Tuple[Any, Optional[str]]:
     """
     多功能 VLM 任务处理器，支持幻灯片校验、去重、摘要生成及热词 OCR。
     
@@ -221,16 +244,12 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         images: 涉及的图片本地路径列表。
         supports_parse: 是否支持原生 .parse() 方法。
         supports_response_format: 是否支持 JSON Schema / JSON Object 结构化输出。
+        disable_thinking: 是否禁用思考/推理过程。
         
     Returns:
         Tuple[Any, Optional[str]]: (提取值, VLM推理过程); 校验/去重返回 bool，摘要返回 str，OCR 返回 List[str]。
     """
-    client = OpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        timeout=600.0,       # 改为 600s: 防止并发队列过长导致排队超时
-        max_retries=0,       # 禁用客户端层重试，全部交由 tenacity 统一管控
-    )
+    client = get_openai_client(api_key, base_url)
     prompts = {
         "validate": (
             "Determine if this image is a presentation slide (PPT/Keynote/Google Slides).\n"
@@ -325,20 +344,15 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         
     model_class, default_val, extractor = task_mapping[task_type]
 
-    parsed, reasoning = structured_llm_call(client, model, [{"role": "user", "content": content}], model_class, supports_parse, supports_response_format)
+    parsed, reasoning = structured_llm_call(client, model, [{"role": "user", "content": content}], model_class, supports_parse, supports_response_format, disable_thinking=disable_thinking)
     return extractor(parsed), reasoning
 
 
 # --- 3. 语音转录 (ASR) 代理 ---
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1.5, min=2, max=10))
+@retry(stop=dynamic_stop, wait=dynamic_wait)
 def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_base: str, api_key: str, hotwords: Optional[str]) -> List[dict]:
-    client = OpenAI(
-        api_key=api_key or "none",
-        base_url=api_base,
-        timeout=180.0,
-        max_retries=0,
-    )
+    client = get_openai_client(api_key, api_base)
     extra_body = {}
     if hotwords:
         extra_body["hotwords"] = hotwords
@@ -446,7 +460,52 @@ def split_audio(audio_path: str, chunk_length_s: int) -> List[str]:
     chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.startswith(f"{base_name}_chunk_") and f.endswith(os.path.splitext(audio_path)[1])])
     return chunks if chunks else [audio_path]
 
-def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "base", api_base: Optional[str] = None, api_key: str = "none", device: str = "cpu", compute_type: str = "int8", hotwords: Optional[str] = None, chunk_length_s: int = 900, cache_dir: Optional[str] = None, progress_hook=None) -> List[dict]:
+@retry(stop=dynamic_stop, wait=dynamic_wait)
+def filter_asr_hotwords(base_url: str, api_key: str, model: str, terms: List[str], agenda: List[str], title: str) -> List[str]:
+    """
+    使用 LLM 筛选出最可能口头说出的 15-20 个核心技术热词作为 ASR 辅助输入。
+    """
+    if not terms:
+        return []
+    client = get_openai_client(api_key, base_url)
+    sys_prompt = (
+        "你是一个技术专家与语言学助教。请从给定的候选技术术语列表中，筛选并精炼出 15-20 个最核心、"
+        "且在讲座中最可能被讲者口头说出的专业词汇（如关键的英文缩写、组件名、专业术语）。"
+        "你的输出必须直接为筛选后的词汇列表，以英文逗号分隔。不要包含任何数字序号、解释说明或 markdown 格式。"
+    )
+    user_content = f"讲座主题: {title}\n讲座议程: {agenda}\n候选专业词汇列表: {', '.join(terms)}"
+    
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        temperature=0.2,
+        timeout=60.0
+    )
+    text = resp.choices[0].message.content or ""
+    # 去除 markdown 标记或换行，并分割
+    text_clean = text.replace("`", "").replace("\n", "").replace("，", ",")
+    filtered = [t.strip() for t in text_clean.split(",") if t.strip()]
+    logger.info(f"ASR: 从 {len(terms)} 个候选词中精炼出 {len(filtered)} 个热词: {filtered}")
+    return filtered
+
+def transcribe_with_whisper(
+    audio_path: str, 
+    prompt: str, 
+    model_size: str = "base", 
+    api_base: Optional[str] = None, 
+    api_key: str = "none", 
+    device: str = "cpu", 
+    compute_type: str = "int8", 
+    hotwords: Optional[str] = None, 
+    chunk_length_s: int = 900, 
+    cache_dir: Optional[str] = None, 
+    progress_hook=None,
+    max_workers: int = 4,
+    chunks: Optional[List[str]] = None
+) -> List[dict]:
     """
     核心语音转录引擎，根据 api_base 自动分发至本地 Faster-Whisper 或远程 API。
     
@@ -461,16 +520,19 @@ def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "bas
         chunk_length_s: 切片时长（秒），API 模式下防超时。
         cache_dir: 用于保存分片缓存的目录。
         progress_hook: 进度更新回调函数。
+        max_workers: 并发处理 API 请求的最大线程数。
+        chunks: 已分好的切片音频文件路径列表（可选，若提供则跳过 split_audio）。
         
     Returns:
         List[dict]: 包含 'start', 'end', 'text', 'speaker' 的分段列表。
     """
     import json
     if api_base:
-        chunks = split_audio(audio_path, chunk_length_s)
+        if chunks is None:
+            chunks = split_audio(audio_path, chunk_length_s)
         all_segments = []
         
-        for i, chunk_path in enumerate(chunks):
+        def _process_chunk(i: int, chunk_path: str) -> List[dict]:
             chunk_cache_file = None
             if cache_dir:
                 base_name = os.path.splitext(os.path.basename(chunk_path))[0]
@@ -481,13 +543,11 @@ def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "bas
                     with open(chunk_cache_file, 'r', encoding='utf-8') as f:
                         chunk_segments = json.load(f)
                     if progress_hook: progress_hook()
-                    all_segments.extend(chunk_segments)
-                    continue
+                    return chunk_segments
                 except Exception:
                     pass
 
-            if len(chunks) > 1:
-                logger.info(f"ASR: 正在处理分片 {i+1}/{len(chunks)} ({os.path.basename(chunk_path)})...")
+            logger.info(f"ASR: 开始转录分片 {i+1}/{len(chunks)} ({os.path.basename(chunk_path)})...")
             
             offset = i * chunk_length_s
             chunk_segments = _transcribe_single_file(
@@ -499,12 +559,22 @@ def transcribe_with_whisper(audio_path: str, prompt: str, model_size: str = "bas
                 seg["end"] = round(seg["end"] + offset, 2)
                 
             if chunk_cache_file:
-                with open(chunk_cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(chunk_segments, f, ensure_ascii=False)
+                try:
+                    with open(chunk_cache_file, 'w', encoding='utf-8') as f:
+                        json.dump(chunk_segments, f, ensure_ascii=False)
+                except Exception as e:
+                    logger.warning(f"ASR: 保存分片缓存失败: {e}")
                     
             if progress_hook: progress_hook()
-            all_segments.extend(chunk_segments)
-            
+            return chunk_segments
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_process_chunk, i, chunk_path) for i, chunk_path in enumerate(chunks)]
+            # 等待所有线程完成并收集结果
+            for fut in futures:
+                all_segments.extend(fut.result())
+                
         all_segments.sort(key=lambda x: x["start"])
         return all_segments
     else:

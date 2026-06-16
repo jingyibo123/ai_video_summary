@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import json
 import shutil
@@ -11,24 +12,37 @@ from . import agents
 from . import processor
 from .config import AppConfig
 from rich.console import Console
-from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+from loguru import logger
 
 console = Console()
 
-# 配置根日志器使用 RichHandler，并共享 console
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%Y-%m-%d %H:%M:%S]",
-    handlers=[RichHandler(console=console, show_path=False)]
-)
+class InterceptHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
 
-# 屏蔽 httpx 和 httpcore 的详细请求日志
+        frame, depth = logging.currentframe(), 2
+        while frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+# Intercept all standard logging messages and redirect to loguru
+logging.basicConfig(handlers=[InterceptHandler()], level=logging.DEBUG, force=True)
+
+# Mute detailed HTTP and API client logs from standard logging
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-logger = logging.getLogger(__name__)
+# Remove default loguru handler and configure console handler to show warnings/errors only
+logger.remove()
+logger.add(sys.stderr, level="WARNING", format="<red>{level: <8}</red> | <level>{message}</level>")
 
 # --- Main Entry ---
 
@@ -52,6 +66,15 @@ def main() -> None:
     video_dir = os.path.dirname(video_abs)
     output_dir = args.output or os.path.join(video_dir, "ai_summary")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Configure Loguru to save all logs to summary.log inside the output directory
+    log_file_path = os.path.join(output_dir, "summary.log")
+    logger.add(
+        log_file_path,
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        encoding="utf-8"
+    )
     
     # 新增：建立局部缓存目录
     cache_dir = os.path.join(output_dir, ".cache")
@@ -136,7 +159,7 @@ def main() -> None:
                 task_val = progress.add_task("[cyan]VLM 分析幻灯片...", total=len(unvalidated))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=config.vlm.max_workers) as pool:
                     futures = {
-                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "analyze", [os.path.join(output_dir, c['image']) if not os.path.isabs(c['image']) else c['image']], config.vlm.supports_parse, config.vlm.supports_response_format): c
+                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "analyze", [os.path.join(output_dir, c['image']) if not os.path.isabs(c['image']) else c['image']], config.vlm.supports_parse, config.vlm.supports_response_format, config.vlm.disable_thinking): c
                         for c in unvalidated
                     }
                     completed = 0
@@ -172,7 +195,8 @@ def main() -> None:
                     is_same, dedup_reasoning = agents.vlm_task(
                         config.vlm.base_url, config.vlm.api_key, config.vlm.model, 
                         "dedup", [img_a_abs, img_b_abs], 
-                        config.vlm.supports_parse, config.vlm.supports_response_format
+                        config.vlm.supports_parse, config.vlm.supports_response_format,
+                        config.vlm.disable_thinking
                     )
                     return i, is_same, dedup_reasoning, a['image'], b['image']
 
@@ -291,7 +315,22 @@ def main() -> None:
         else:
             vul = []
             for s in slides_info: vul.extend(s.get("keywords") or [])
-            all_terms = list(set(config.context.custom_terms + vul))
+            raw_terms = list(set(config.context.custom_terms + vul))
+            
+            # Use LLM to filter and refine technical terms if there are too many (keeps ASR prompt focused)
+            if len(raw_terms) > 20:
+                logger.info(f"ASR: 候选热词过多 ({len(raw_terms)} 个)，使用 LLM 进行精炼筛选...")
+                all_terms = agents.filter_asr_hotwords(
+                    config.get_llm_base_url(),
+                    config.get_llm_api_key(),
+                    config.llm.model,
+                    raw_terms,
+                    config.context.agenda,
+                    config.context.meeting_title
+                )
+            else:
+                all_terms = raw_terms
+            
             prompt = f"这是一段技术讲座记录，请输出简体中文并带标点！主题: {config.context.meeting_title}。议程: {'，'.join(config.context.agenda[:3])}。"
             if all_terms: prompt += "包含术语：" + "，".join(all_terms)
             
@@ -304,21 +343,14 @@ def main() -> None:
                 if os.path.exists(mp3_path):
                     target_aud_path = mp3_path
             
-            # 计算切片大概数量来设置进度条
+            # Pre-split chunks beforehand to set accurate progress bar total
             from .agents import split_audio
-            # 虽然 split_audio 会生成文件，但这里我们可以先预估或直接利用返回的文件数
-            # 为了准确，让 agents.py 的 transcribe_with_whisper 自己利用 progress_hook 更新
-            # 但我们需要知道 total，一种做法是传入未初始化的 task，或通过推断
-            # 这里我们简单粗估音频长度或由 `transcribe_with_whisper` 内部自己建立进度，但由于是在 `with Progress` 里，我们建立一个 task
-            task_asr = progress.add_task("[yellow]ASR 语音转录...", total=100) # 用一个假的 100%，然后在内部按切片推进
-            # 改进：我们传入一个 advance 钩子，由于未知总数，暂时设为不确定或简单按段
-            # 更好的办法是：transcribe_with_whisper 先获取切片数，但这需要改变它的签名
-            # 简化版：由于 API base 切片是在函数里做的，我们将进度条交由钩子，每次处理完切片调用钩子并传递当前进度。但 progress_hook 只能 advance。
-            # 直接在外部先分片以知道总数？ 不，我们先默认总进度不显示百分比，或者在 agents.py 里用 rich。
-            # 这里我们仅仅传入一个简单的 hook: progress.advance(task_asr, 1) 但 total 需要是 len(chunks)
-            # 为了优雅，让 transcribe_with_whisper 自行处理？不，我们保留 progress_hook。
-            # 在没有 total 的情况下，设置 total=None 会变成 spinner。
-            progress.update(task_asr, total=None) 
+            if config.asr.api_base:
+                chunks = split_audio(target_aud_path, config.asr.chunk_length_s)
+                task_asr = progress.add_task("[yellow]ASR 语音转录...", total=len(chunks))
+            else:
+                chunks = None
+                task_asr = progress.add_task("[yellow]ASR 语音转录...", total=1)
             
             hotwords_str = ",".join(all_terms) if all_terms else None
             transcript = agents.transcribe_with_whisper(
@@ -332,27 +364,30 @@ def main() -> None:
                 hotwords=hotwords_str,
                 chunk_length_s=config.asr.chunk_length_s,
                 cache_dir=cache_dir,
-                progress_hook=lambda: progress.advance(task_asr, 1) if progress.tasks[task_asr].total else None
+                progress_hook=lambda: progress.advance(task_asr, 1),
+                max_workers=config.asr.max_workers,
+                chunks=chunks
             )
             _save_json(transcript, ts_path)
-            progress.update(task_asr, completed=100, total=100) # 完成后变成实心
+            progress.update(task_asr, completed=len(chunks) if chunks else 1, total=len(chunks) if chunks else 1)
      
         # 4. 提纯与渲染
         final_path = os.path.join(output_dir, "final_data.json")
         if (final_data := _load_json(final_path)) is None:
             task_proc = progress.add_task("[blue]生成技术博客...", total=len(slides_info))
             final_data = processor.build_final_json(
-                config.vlm.base_url, 
-                config.vlm.api_key,
-                config.vlm.model, 
+                config.get_llm_base_url(), 
+                config.get_llm_api_key(),
+                config.llm.model, 
                 slides_info, 
                 transcript, 
                 config.context.model_dump(),
-                supports_parse=config.vlm.supports_parse,
-                supports_response_format=config.vlm.supports_response_format,
-                max_workers=config.vlm.max_workers,
+                supports_parse=config.llm.supports_parse,
+                supports_response_format=config.llm.supports_response_format,
+                max_workers=config.llm.max_workers,
                 cache_dir=cache_dir,
-                progress_hook=lambda: progress.advance(task_proc, 1)
+                progress_hook=lambda: progress.advance(task_proc, 1),
+                disable_thinking=config.llm.disable_thinking
             )
             _save_json(final_data, final_path)
      

@@ -23,6 +23,17 @@ class VLMConfig(BaseModel):
     supports_parse: bool = Field(default=True, description="Whether the VLM API supports beta.chat.completions.parse")
     supports_response_format: bool = Field(default=True, description="Whether the VLM API supports response_format={'type': 'json_schema'}")
     max_workers: int = Field(default=1, description="Max concurrent workers for VLM API requests")
+    disable_thinking: bool = Field(default=False, description="Whether to disable thinking/reasoning process (e.g. for DeepSeek/Qwen APIs)")
+
+
+class LLMConfig(BaseModel):
+    model: str = Field(default="qwen2.5-7b-instruct", description="LLM model name for text tasks")
+    base_url: Optional[str] = Field(default=None, description="LLM API base URL (falls back to VLM base URL if None)")
+    api_key: Optional[str] = Field(default=None, description="LLM API key (falls back to VLM API key if None)")
+    supports_parse: bool = Field(default=True, description="Whether the LLM API supports beta.chat.completions.parse")
+    supports_response_format: bool = Field(default=True, description="Whether the LLM API supports response_format={'type': 'json_schema'}")
+    max_workers: int = Field(default=1, description="Max concurrent workers for LLM API requests")
+    disable_thinking: bool = Field(default=False, description="Whether to disable thinking/reasoning process (e.g. for DeepSeek/Qwen APIs)")
 
 
 class ASRConfig(BaseModel):
@@ -32,11 +43,19 @@ class ASRConfig(BaseModel):
     local_device: str = Field(default="cpu", description="Device for local Whisper (cpu/cuda)")
     local_compute_type: str = Field(default="int8", description="Compute type for local Whisper")
     chunk_length_s: int = Field(default=900, description="Chunk length in seconds for ASR API (to avoid timeouts on long files)")
+    max_workers: int = Field(default=4, description="Max concurrent workers for ASR API requests")
 
 
 class CVConfig(BaseModel):
     diff_threshold: int = Field(default=850, description="MSE threshold for frame difference")
     target_size: Tuple[int, int] = Field(default=(256, 144), description="Image size for comparison")
+
+
+class RetryConfig(BaseModel):
+    max_attempts: int = Field(default=3, description="Maximum number of retry attempts")
+    multiplier: float = Field(default=1.5, description="Multiplier for exponential backoff")
+    min_seconds: float = Field(default=2.0, description="Minimum wait time in seconds")
+    max_seconds: float = Field(default=10.0, description="Maximum wait time in seconds")
 
 
 class ProjectContext(BaseModel):
@@ -57,7 +76,7 @@ class ProjectContext(BaseModel):
 class AppConfig(BaseSettings):
     """
     顶级配置模型，自动从 .env 和环境变量加载。
-    env_nested_delimiter="__" 使得 VLM__BASE_URL 自动映射到 vlm.base_url。
+    env_nested_delimiter="__" 使得 VLM__BASE_URL 自动映射 to vlm.base_url。
     """
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -67,9 +86,17 @@ class AppConfig(BaseSettings):
     )
 
     vlm: VLMConfig = VLMConfig()
+    llm: LLMConfig = LLMConfig()
     asr: ASRConfig = ASRConfig()
     cv: CVConfig = CVConfig()
+    retry: RetryConfig = RetryConfig()
     context: ProjectContext = ProjectContext()
+
+    def get_llm_base_url(self) -> str:
+        return self.llm.base_url if self.llm.base_url else self.vlm.base_url
+
+    def get_llm_api_key(self) -> str:
+        return self.llm.api_key if self.llm.api_key else self.vlm.api_key
 
     @classmethod
     def load(cls, context_yaml: str = "context.yaml") -> "AppConfig":
@@ -89,4 +116,36 @@ class AppConfig(BaseSettings):
                 data = yaml.safe_load(f) or {}
             ctx_data = data.get("context", data)  # 兼容带/不带顶层 context 键的格式
             config = config.model_copy(update={"context": ProjectContext(**ctx_data)})
+        set_global_config(config)
         return config
+
+
+# Global Configuration Singleton reference for tenacity integration
+_global_config: Optional["AppConfig"] = None
+
+def get_global_config() -> Optional["AppConfig"]:
+    return _global_config
+
+def set_global_config(config: "AppConfig") -> None:
+    global _global_config
+    _global_config = config
+
+def dynamic_stop(retry_state) -> bool:
+    cfg = get_global_config()
+    max_attempts = cfg.retry.max_attempts if (cfg and cfg.retry) else 3
+    return retry_state.attempt_number >= max_attempts
+
+def dynamic_wait(retry_state) -> float:
+    cfg = get_global_config()
+    if cfg and cfg.retry:
+        multiplier = cfg.retry.multiplier
+        min_val = cfg.retry.min_seconds
+        max_val = cfg.retry.max_seconds
+    else:
+        multiplier = 1.5
+        min_val = 2.0
+        max_val = 10.0
+    
+    attempt = retry_state.attempt_number
+    delay = multiplier * (2.0 ** (attempt - 1))
+    return min(max(delay, min_val), max_val)
