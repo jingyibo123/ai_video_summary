@@ -825,3 +825,23 @@ def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] 
     except subprocess.CalledProcessError as e:
         logger.error(f"FFmpeg failed to extract audio: {e.stderr.decode('utf-8', errors='ignore')}")
         raise RuntimeError(f"FFmpeg extract_audio failed: {e}")
+
+
+def has_audio_track(video_path: str) -> bool:
+    """
+    使用 ffprobe 检查视频文件是否包含音频轨。
+    """
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(video_path)
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return "audio" in res.stdout.lower()
+    except Exception as e:
+        logger.warning(f"ffprobe 检测音频轨失败: {e}")
+        # 如果检测出错，默认返回 True（安全回退，由后续步骤做尝试）
+        return True
+

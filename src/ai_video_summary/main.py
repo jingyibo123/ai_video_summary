@@ -153,6 +153,15 @@ def main() -> None:
     t_start = time.time()
     logger.info(f"============== 开始流水线 V2.1 (Pydantic Config 版) Output: {output_dir} ==============")
     
+    # 自动检测音频轨，避免无音频视频崩溃且静默生成静音文件的错误
+    if not args.skip_asr:
+        try:
+            if not agents.has_audio_track(str(video_path)):
+                logger.error("🚨🚨🚨 [CRITICAL WARNING] 检测到输入视频文件没有音频轨！自动开启 --skip-asr 跳过语音转录与文本生成阶段！ 🚨🚨🚨")
+                args.skip_asr = True
+        except Exception as e:
+            logger.warning(f"检测视频音频轨失败: {e}")
+    
     def _load_json(path: Path):
         if path.exists():
             try:

@@ -238,11 +238,14 @@ def main() -> None:
     # Queue is automatically enabled for generator functions in Gradio 4+,
     # but explicitly defining it ensures robust SSE streaming.
     demo.queue()
+    import os
+    server_port = int(os.environ.get("PORT", 7860))
+    inbrowser = os.environ.get("IN_BROWSER", "True").lower() == "true"
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7860,
+        server_port=server_port,
         share=False,
-        inbrowser=True,
+        inbrowser=inbrowser,
         theme=gr.themes.Ocean(),
         mcp_server=True
     )
