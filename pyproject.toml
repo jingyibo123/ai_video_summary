@@ -14,6 +14,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "rich>=13.0.0",
     "loguru>=0.7.0",
+    "gradio>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,7 @@ local-whisper = [
 
 [project.scripts]
 ai-vsummarize = "ai_video_summary.main:main"
+ai-webui = "ai_video_summary.app:main"
 
 [build-system]
 requires = ["hatchling"]

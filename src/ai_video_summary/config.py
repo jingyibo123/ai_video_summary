@@ -10,7 +10,6 @@ Pydantic-Settings 自动处理 .env 读取与环境变量映射，
 """
 
 from pathlib import Path
-import yaml
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -101,25 +100,12 @@ class AppConfig(BaseSettings):
         return self.llm.api_key if self.llm.api_key else self.vlm.api_key
 
     @classmethod
-    def load(cls, context_yaml: Optional[str] = None) -> "AppConfig":
+    def load(cls) -> "AppConfig":
         """
-        加载配置：先由 BaseSettings 自动从 .env 和环境变量填充，
-        再从 context_yaml 覆盖会议元信息部分。
-
-        Args:
-            context_yaml: 会议上下文 YAML 文件路径（仅含 context 字段）。
-
-        Returns:
-            完整填充的 AppConfig 实例。
+        加载配置：BaseSettings 自动从 .env 和环境变量读取，
+        context 字段通过 CLI 参数或 Gradio UI 输入提供。
         """
-        config = cls()  # BaseSettings 在此自动读取 .env 和环境变量
-        if context_yaml:
-            yaml_path = Path(context_yaml)
-            if yaml_path.exists():
-                with yaml_path.open("r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-                ctx_data = data.get("context", data)  # 兼容带/不带顶层 context 键的格式
-                config = config.model_copy(update={"context": ProjectContext(**ctx_data)})
+        config = cls()
         set_global_config(config)
         return config
 

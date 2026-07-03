@@ -7,7 +7,6 @@ import logging
 import argparse
 import concurrent.futures
 import subprocess
-import yaml
 
 from . import agents
 from . import processor
@@ -63,7 +62,6 @@ def main() -> None:
     自动化流水线入口：协调 CV、VLM、ASR 及数据渲染的完整流程。
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default=None, help="会议上下文 YAML 文件路径 (默认自动读取当前目录的 context.yaml 如果存在)")
     parser.add_argument("--video", required=True, help="输入视频路径")
     parser.add_argument("--output", default=None, help="输出目录 (默认在视频同级目录下的 {video_name}.ai_summary)")
     parser.add_argument("--max-time", type=int, default=None, help="最大处理时长（秒）")
@@ -73,15 +71,9 @@ def main() -> None:
     # ProjectContext CLI overrides
     parser.add_argument("--meeting-title", help="会议标题")
     parser.add_argument("--date", help="会议日期")
-    parser.add_argument("--location", help="会议地点")
     parser.add_argument("--attendees", nargs="*", help="参会人列表 (空格或逗号分隔)")
     parser.add_argument("--agenda", nargs="*", help="会议议程列表 (空格或逗号分隔)")
     parser.add_argument("--custom-terms", nargs="*", help="自定义ASR术语列表 (空格或逗号分隔)")
-    
-    # Reasoning limit CLI overrides
-    parser.add_argument("--max-thinking-tokens", "--max-reason-tokens", type=int, default=None, help="统一限制模型思考推理的最大 token 长度")
-    parser.add_argument("--vlm-max-thinking-tokens", type=int, default=None, help="限制 VLM 思考推理的最大 token 长度")
-    parser.add_argument("--llm-max-thinking-tokens", type=int, default=None, help="限制 LLM 思考推理的最大 token 长度")
     
     args = parser.parse_args()
     
@@ -107,13 +99,7 @@ def main() -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. 加载与备份配置
-    config_file = args.config
-    if not config_file:
-        default_yaml = Path("context.yaml")
-        if default_yaml.exists():
-            config_file = str(default_yaml)
-            
-    config = AppConfig.load(config_file)
+    config = AppConfig.load()
     
     # CLI Overrides for context fields
     update_data = {}
@@ -121,26 +107,36 @@ def main() -> None:
         update_data["meeting_title"] = args.meeting_title
     if args.date is not None:
         update_data["date"] = args.date
-    if args.location is not None:
-        update_data["location"] = args.location
     if args.attendees is not None:
         update_data["attendees"] = parse_list_arg(args.attendees)
     if args.agenda is not None:
         update_data["agenda"] = parse_list_arg(args.agenda)
     if args.custom_terms is not None:
         update_data["custom_terms"] = parse_list_arg(args.custom_terms)
-        
+
+    # Auto-infer title/date from filename when not explicitly provided
+    needs_title = "meeting_title" not in update_data
+    needs_date = "date" not in update_data
+    if needs_title or needs_date:
+        try:
+            inferred_date, inferred_title = agents.infer_from_filename(
+                video_path.stem,
+                base_url=config.get_llm_base_url(),
+                api_key=config.get_llm_api_key(),
+                model=config.llm.model,
+                supports_response_format=config.llm.supports_response_format,
+            )
+            if needs_title and inferred_title:
+                update_data["meeting_title"] = inferred_title
+            if needs_date and inferred_date:
+                update_data["date"] = inferred_date
+        except Exception as e:
+            logger.warning(f"文件名推断失败（非致命）: {e}")
+
     if update_data:
         config.context = config.context.model_copy(update=update_data)
         
-    # CLI Overrides for max_thinking_tokens
-    vlm_thinking = args.vlm_max_thinking_tokens if args.vlm_max_thinking_tokens is not None else args.max_thinking_tokens
-    llm_thinking = args.llm_max_thinking_tokens if args.llm_max_thinking_tokens is not None else args.max_thinking_tokens
-    if vlm_thinking is not None:
-        config.vlm = config.vlm.model_copy(update={"max_thinking_tokens": vlm_thinking})
-    if llm_thinking is not None:
-        config.llm = config.llm.model_copy(update={"max_thinking_tokens": llm_thinking})
-        
+    
     # 保存配置到输出文件夹
     # 2.1 完整 AppConfig dump 到 json (脱敏 api_key)
     config_dump = config.model_dump()
@@ -152,10 +148,6 @@ def main() -> None:
     with config_run_path.open("w", encoding="utf-8") as f:
         json.dump(config_dump, f, ensure_ascii=False, indent=2)
         
-    # 2.2 context.yaml
-    context_out_path = output_dir / "context.yaml"
-    with context_out_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump({"context": config.context.model_dump()}, f, allow_unicode=True, sort_keys=False)
     max_time = args.max_time if args.max_time else None
 
     t_start = time.time()

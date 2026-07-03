@@ -654,6 +654,64 @@ def filter_asr_hotwords(base_url: str, api_key: str, model: str, terms: List[str
     logger.info(f"ASR: 从 {len(terms)} 个候选词中精炼出 {len(filtered)} 个热词: {filtered}")
     return filtered
 
+
+@retry(stop=dynamic_stop, wait=dynamic_wait)
+def infer_from_filename(stem: str, base_url: str, api_key: str, model: str, supports_response_format: bool = True) -> tuple[str, str]:
+    """
+    使用 LLM 从视频文件名中提取日期和会议标题。
+
+    Args:
+        stem: 视频文件名（不含扩展名）。
+        base_url: OpenAI 兼容 API 地址。
+        api_key: API 密钥。
+        model: LLM 模型名称。
+        supports_response_format: 是否支持 json_object 格式化输出。
+
+    Returns:
+        Tuple[str, str]: (date_str, title_str)，无法识别时返回空字符串。
+    """
+    import json as _json
+    client = get_openai_client(api_key, base_url)
+
+    prompt = (
+        f'视频文件名（无扩展名）："{stem}"\n'
+        "请从文件名中提取：\n"
+        "1. 日期（格式 YYYY-MM-DD，无法确定则留空字符串，时间部分忽略）\n"
+        "2. 会议/视频标题（去除日期、时间戳和技术后缀，保留有意义的名称）\n"
+        '以 JSON 返回，格式：{"date": "...", "title": "..."}'
+    )
+
+    kwargs: dict = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": "你是文件名解析助手，只输出 JSON，不要额外解释。"},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=80,
+        timeout=30.0,
+    )
+    if supports_response_format:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    resp = client.chat.completions.create(**kwargs)
+    text = (resp.choices[0].message.content or "").strip()
+
+    try:
+        data = _json.loads(text)
+    except Exception:
+        # Regex fallback for models that wrap JSON in markdown code fences
+        m_date = re.search(r'"date"\s*:\s*"([^"]*)"', text)
+        m_title = re.search(r'"title"\s*:\s*"([^"]*)"', text)
+        data = {
+            "date": m_date.group(1) if m_date else "",
+            "title": m_title.group(1) if m_title else "",
+        }
+
+    date = data.get("date", "").strip()
+    title = data.get("title", "").strip()
+    logger.info(f"文件名推断: stem={stem!r} → date={date!r}, title={title!r}")
+    return date, title
+
 def transcribe_with_whisper(
     audio_path: str, 
     prompt: str, 
