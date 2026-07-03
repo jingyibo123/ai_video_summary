@@ -105,20 +105,75 @@ def extract_key_frames(video_path: str, output_dir: str,
     
     t_start = time.time()
     
+    def detect_best_hwaccel() -> str:
+        import shutil
+        try:
+            res = subprocess.run(["ffmpeg", "-hwaccels"], capture_output=True, text=True, timeout=5)
+            supported = res.stdout.splitlines()
+            supported = [line.strip() for line in supported if line.strip() and not line.startswith("Hardware")]
+        except Exception as e:
+            logger.warning(f"CV: 无法获取 FFmpeg 支持的硬件加速器: {e}")
+            return "cpu"
+
+        candidates = []
+        if "cuda" in supported:
+            if shutil.which("nvidia-smi"):
+                try:
+                    if subprocess.run(["nvidia-smi"], capture_output=True, timeout=5).returncode == 0:
+                        candidates.append("cuda")
+                except Exception:
+                    pass
+        if "d3d11va" in supported:
+            candidates.append("d3d11va")
+        if "vaapi" in supported:
+            candidates.append("vaapi")
+        if "dxva2" in supported:
+            candidates.append("dxva2")
+
+        for hw in candidates:
+            cmd_test = [
+                "ffmpeg", "-y",
+                "-hwaccel", hw,
+                "-i", str(video_path),
+                "-t", "0.5",
+                "-vf", f"fps=1.0,scale={target_size[0]}:{target_size[1]}",
+                "-f", "rawvideo",
+                "-pix_fmt", "gray",
+                "-"
+            ]
+            try:
+                test_res = subprocess.run(
+                    cmd_test,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+                if test_res.returncode == 0:
+                    logger.info(f"CV: 硬件加速测试成功，选择解码加速器: {hw}")
+                    return hw
+            except Exception:
+                pass
+
+        logger.info("CV: 未检测到或未通过测试合适的硬件加速器，使用 CPU 默认解码")
+        return "cpu"
+
+    hwaccel = detect_best_hwaccel()
+
     # 构造 FFmpeg 命令行，流式提取指定 FPS 的低分辨率灰度图并输出 showinfo 日志
     fps_filter = 1.0 / sample_interval
     w, h = target_size
-    cmd = [
-        "ffmpeg",
+    cmd = ["ffmpeg"]
+    if max_seconds:
+        cmd.extend(["-t", str(max_seconds)])
+    if hwaccel != "cpu":
+        cmd.extend(["-hwaccel", hwaccel])
+    cmd.extend([
         "-i", str(video_path),
         "-vf", f"fps={fps_filter},scale={w}:{h},showinfo",
         "-f", "rawvideo",
         "-pix_fmt", "gray",
         "pipe:1"
-    ]
-    if max_seconds:
-        cmd.insert(1, "-t")
-        cmd.insert(2, str(max_seconds))
+    ])
         
     # 启动 FFmpeg 子进程，同时读取 stdout (图像字节) 和 stderr (showinfo 打印的 timestamp)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
