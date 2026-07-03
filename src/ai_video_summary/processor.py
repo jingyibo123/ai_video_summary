@@ -9,7 +9,7 @@
 """
 
 import concurrent.futures
-import os
+from pathlib import Path
 import json
 from typing import List, Optional, Callable
 from openai import OpenAI
@@ -54,9 +54,9 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
     }
     
     sys_prompt = f"你是一名为技术讲座进行深度博文提炼的专家。总议程: [{agenda_str}]。请将以下片段转化为严肃的技术干货章节。"
-
+ 
     from .agents import structured_llm_call, get_openai_client
-
+ 
     @retry(stop=dynamic_stop, wait=dynamic_wait)
     def call_llm(user_info_str: str) -> Optional[dict]:
         client = get_openai_client(api_key, base_url)
@@ -76,10 +76,12 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
             raise
 
     def _process_one(i: int, s: dict) -> dict:
-        cache_file = os.path.join(cache_dir, f"section_{i}.json") if cache_dir else None
-        if cache_file and os.path.exists(cache_file):
+        cache_dir_path = Path(cache_dir) if cache_dir else None
+        cache_file = cache_dir_path / f"section_{i}.json" if cache_dir_path else None
+        if cache_file and cache_file.exists():
             try:
-                node = json.load(open(cache_file, 'r', encoding='utf-8'))
+                with cache_file.open('r', encoding='utf-8') as f:
+                    node = json.load(f)
                 if progress_hook: progress_hook()
                 return node
             except Exception:
@@ -108,8 +110,11 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
                      "minutes_content": [seg for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]})
                      
         if cache_file:
-            with open(cache_file, 'w', encoding='utf-8') as f:
-                json.dump(node, f, ensure_ascii=False)
+            try:
+                with cache_file.open('w', encoding='utf-8') as f:
+                    json.dump(node, f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"Processor: 保存分段缓存失败: {e}")
                 
         if progress_hook: progress_hook()
         return node
@@ -121,7 +126,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
 
 # --- 2. Markdown 渲染 (Markdown Agent) ---
 
-def render_minutes(data: dict, out_path: str) -> None:
+def render_minutes(data: dict, out_path: str | Path) -> None:
     """
     将结构化数据渲染为 Format A: 时间轴驱动的实录纪要。
     
@@ -150,9 +155,10 @@ def render_minutes(data: dict, out_path: str) -> None:
             else:
                 lines[-1] += f" {seg['text']}"
     
-    with open(out_path, 'w', encoding='utf-8') as f: f.write("\n".join(lines))
+    out_path_obj = Path(out_path)
+    with out_path_obj.open('w', encoding='utf-8') as f: f.write("\n".join(lines))
 
-def render_blog(data: dict, out_path: str) -> None:
+def render_blog(data: dict, out_path: str | Path) -> None:
     """
     将结构化数据渲染为 Format B: 叙事风格的技术博客。
     
@@ -170,4 +176,5 @@ def render_blog(data: dict, out_path: str) -> None:
         lines.append(f"![{sec['image_caption']}]({sec['image_path']})\n> {sec['image_caption']}")
         lines.append(f"\n{sec['blog_text']}")
         
-    with open(out_path, 'w', encoding='utf-8') as f: f.write("\n".join(lines))
+    out_path_obj = Path(out_path)
+    with out_path_obj.open('w', encoding='utf-8') as f: f.write("\n".join(lines))

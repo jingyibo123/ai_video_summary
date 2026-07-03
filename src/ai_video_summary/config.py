@@ -9,7 +9,7 @@ Pydantic-Settings 自动处理 .env 读取与环境变量映射，
 使用双下划线分隔符映射嵌套字段（如 VLM__BASE_URL → config.vlm.base_url）。
 """
 
-import os
+from pathlib import Path
 import yaml
 from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
@@ -99,10 +99,10 @@ class AppConfig(BaseSettings):
         return self.llm.api_key if self.llm.api_key else self.vlm.api_key
 
     @classmethod
-    def load(cls, context_yaml: str = "context.yaml") -> "AppConfig":
+    def load(cls, context_yaml: Optional[str] = None) -> "AppConfig":
         """
         加载配置：先由 BaseSettings 自动从 .env 和环境变量填充，
-        再从 context.yaml 覆盖会议元信息部分。
+        再从 context_yaml 覆盖会议元信息部分。
 
         Args:
             context_yaml: 会议上下文 YAML 文件路径（仅含 context 字段）。
@@ -111,11 +111,13 @@ class AppConfig(BaseSettings):
             完整填充的 AppConfig 实例。
         """
         config = cls()  # BaseSettings 在此自动读取 .env 和环境变量
-        if os.path.exists(context_yaml):
-            with open(context_yaml, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            ctx_data = data.get("context", data)  # 兼容带/不带顶层 context 键的格式
-            config = config.model_copy(update={"context": ProjectContext(**ctx_data)})
+        if context_yaml:
+            yaml_path = Path(context_yaml)
+            if yaml_path.exists():
+                with yaml_path.open("r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                ctx_data = data.get("context", data)  # 兼容带/不带顶层 context 键的格式
+                config = config.model_copy(update={"context": ProjectContext(**ctx_data)})
         set_global_config(config)
         return config
 

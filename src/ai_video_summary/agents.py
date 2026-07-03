@@ -8,8 +8,7 @@ AI 智能代理集 (Core AI Agents).
 
 设计哲学：极简接口，高内聚低耦合，所有识别任务均内置指数退避重试机制。
 """
-
-import os
+from pathlib import Path
 import re
 import cv2
 import time
@@ -81,10 +80,11 @@ def extract_key_frames(video_path: str, output_dir: str,
         List[dict]: 包含 'start_time', 'end_time', 'image' 的列表。
     """
     logger.info(f"CV: 开始分析视频流 {video_path}")
-    cands_dir = os.path.join(output_dir, "candidates")
-    os.makedirs(cands_dir, exist_ok=True)
+    output_dir_path = Path(output_dir)
+    cands_dir = output_dir_path / "candidates"
+    cands_dir.mkdir(parents=True, exist_ok=True)
     
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"CV: 无法打开视频文件 {video_path}")
         
@@ -103,8 +103,8 @@ def extract_key_frames(video_path: str, output_dir: str,
         if last_full_frame is not None:
             t_str = lambda t: f"{int(t)//3600:02d}-{int(t)%3600//60:02d}-{int(t)%60:02d}"
             fname = f"{t_str(current_slide_start_sec)}_{t_str(last_time_sec)}.jpg"
-            out_path = os.path.join(cands_dir, fname)
-            cv2.imwrite(out_path, last_full_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            out_path = cands_dir / fname
+            cv2.imwrite(str(out_path), last_full_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
             rel_path = f"candidates/{fname}"
             results.append({"start_time": current_slide_start_sec, "end_time": last_time_sec, "image": rel_path})
     
@@ -153,6 +153,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
             "thinking": {"type": "disabled"},
             "enable_thinking": False
         }
+
 
     if supports_parse:
         try:
@@ -359,8 +360,9 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
         extra_body["hot_words"] = hotwords
     resp = None
     formats_to_try = ["verbose_json", "json", "text"]
+    audio_path_obj = Path(audio_path)
     for fmt in formats_to_try:
-        with open(audio_path, "rb") as f:
+        with audio_path_obj.open("rb") as f:
             try:
                 logger.info(f"ASR trying response_format='{fmt}' for model '{model_size}'")
                 resp = client.audio.transcriptions.create(
@@ -401,10 +403,10 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
             combined.append(item)
 
     try:
-        size_bytes = os.path.getsize(audio_path)
-        if audio_path.lower().endswith(".mp3"):
+        size_bytes = audio_path_obj.stat().st_size
+        if audio_path_obj.suffix.lower() == ".mp3":
             duration = size_bytes * 8 / 64000
-        elif audio_path.lower().endswith(".wav"):
+        elif audio_path_obj.suffix.lower() == ".wav":
             duration = size_bytes / 32000
         else:
             duration = 1680.0
@@ -429,15 +431,17 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
 def split_audio(audio_path: str, chunk_length_s: int) -> List[str]:
     """
     使用 FFmpeg 将长音频分割为多个等长切片，用于规避 ASR API 的限制。
-    返回切片文件路径列表。
+    返回切片 file path 列表。
     """
-    output_dir = os.path.dirname(audio_path)
-    base_name = os.path.splitext(os.path.basename(audio_path))[0]
-    out_pattern = os.path.join(output_dir, f"{base_name}_chunk_%03d{os.path.splitext(audio_path)[1]}")
+    audio_path_obj = Path(audio_path)
+    output_dir = audio_path_obj.parent
+    base_name = audio_path_obj.stem
+    suffix = audio_path_obj.suffix
+    out_pattern = output_dir / f"{base_name}_chunk_%03d{suffix}"
     
     cmd_probe = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+        "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path_obj)
     ]
     try:
         duration_str = subprocess.check_output(cmd_probe, timeout=10).decode('utf-8').strip()
@@ -447,18 +451,18 @@ def split_audio(audio_path: str, chunk_length_s: int) -> List[str]:
         duration = 0.0
         
     if duration > 0 and duration <= chunk_length_s + 5:
-        return [audio_path]
+        return [str(audio_path_obj)]
         
     logger.info(f"ASR chunking: 音频时长 {duration:.1f}s 超过 {chunk_length_s}s，使用 FFmpeg 切片...")
     
     cmd_split = [
-        "ffmpeg", "-i", audio_path, "-f", "segment", 
-        "-segment_time", str(chunk_length_s), "-c", "copy", "-y", out_pattern
+        "ffmpeg", "-i", str(audio_path_obj), "-f", "segment", 
+        "-segment_time", str(chunk_length_s), "-c", "copy", "-y", str(out_pattern)
     ]
     subprocess.run(cmd_split, capture_output=True)
     
-    chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.startswith(f"{base_name}_chunk_") and f.endswith(os.path.splitext(audio_path)[1])])
-    return chunks if chunks else [audio_path]
+    chunks = sorted([str(f) for f in output_dir.iterdir() if f.name.startswith(f"{base_name}_chunk_") and f.name.endswith(suffix)])
+    return chunks if chunks else [str(audio_path_obj)]
 
 @retry(stop=dynamic_stop, wait=dynamic_wait)
 def filter_asr_hotwords(base_url: str, api_key: str, model: str, terms: List[str], agenda: List[str], title: str) -> List[str]:
@@ -527,31 +531,33 @@ def transcribe_with_whisper(
         List[dict]: 包含 'start', 'end', 'text', 'speaker' 的分段列表。
     """
     import json
+    audio_path_obj = Path(audio_path)
+    cache_dir_obj = Path(cache_dir) if cache_dir else None
     if api_base:
         if chunks is None:
-            chunks = split_audio(audio_path, chunk_length_s)
+            chunks = split_audio(str(audio_path_obj), chunk_length_s)
         all_segments = []
         
         def _process_chunk(i: int, chunk_path: str) -> List[dict]:
+            chunk_path_obj = Path(chunk_path)
             chunk_cache_file = None
-            if cache_dir:
-                base_name = os.path.splitext(os.path.basename(chunk_path))[0]
-                chunk_cache_file = os.path.join(cache_dir, f"{base_name}.json")
+            if cache_dir_obj:
+                chunk_cache_file = cache_dir_obj / f"{chunk_path_obj.stem}.json"
                 
-            if chunk_cache_file and os.path.exists(chunk_cache_file):
+            if chunk_cache_file and chunk_cache_file.exists():
                 try:
-                    with open(chunk_cache_file, 'r', encoding='utf-8') as f:
+                    with chunk_cache_file.open('r', encoding='utf-8') as f:
                         chunk_segments = json.load(f)
                     if progress_hook: progress_hook()
                     return chunk_segments
                 except Exception:
                     pass
 
-            logger.info(f"ASR: 开始转录分片 {i+1}/{len(chunks)} ({os.path.basename(chunk_path)})...")
+            logger.info(f"ASR: 开始转录分片 {i+1}/{len(chunks)} ({chunk_path_obj.name})...")
             
             offset = i * chunk_length_s
             chunk_segments = _transcribe_single_file(
-                chunk_path, prompt, model_size, api_base, api_key, hotwords
+                str(chunk_path_obj), prompt, model_size, api_base, api_key, hotwords
             )
             
             for seg in chunk_segments:
@@ -560,7 +566,7 @@ def transcribe_with_whisper(
                 
             if chunk_cache_file:
                 try:
-                    with open(chunk_cache_file, 'w', encoding='utf-8') as f:
+                    with chunk_cache_file.open('w', encoding='utf-8') as f:
                         json.dump(chunk_segments, f, ensure_ascii=False)
                 except Exception as e:
                     logger.warning(f"ASR: 保存分片缓存失败: {e}")
@@ -580,7 +586,7 @@ def transcribe_with_whisper(
     else:
         from faster_whisper import WhisperModel
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        segments, _ = model.transcribe(audio_path, language="zh", initial_prompt=prompt, vad_filter=True)
+        segments, _ = model.transcribe(str(audio_path_obj), language="zh", initial_prompt=prompt, vad_filter=True)
         return [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip(), "speaker": "讲者"} for s in segments]
 
 def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] = None) -> None:
@@ -592,8 +598,10 @@ def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] 
         output_path: 输出 Wav 路径。
         max_seconds: 提取的最大时长（秒）。
     """
-    if os.path.exists(output_path): return
-    cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", output_path]
+    video_path_obj = Path(video_path)
+    output_path_obj = Path(output_path)
+    if output_path_obj.exists(): return
+    cmd = ["ffmpeg", "-i", str(video_path_obj), "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", str(output_path_obj)]
     if max_seconds: cmd.insert(-1, "-t"); cmd.insert(-1, str(max_seconds))
     try:
         subprocess.run(cmd, capture_output=True, check=True)
