@@ -78,6 +78,11 @@ def main() -> None:
     parser.add_argument("--agenda", nargs="*", help="会议议程列表 (空格或逗号分隔)")
     parser.add_argument("--custom-terms", nargs="*", help="自定义ASR术语列表 (空格或逗号分隔)")
     
+    # Reasoning limit CLI overrides
+    parser.add_argument("--max-thinking-tokens", "--max-reason-tokens", type=int, default=None, help="统一限制模型思考推理的最大 token 长度")
+    parser.add_argument("--vlm-max-thinking-tokens", type=int, default=None, help="限制 VLM 思考推理的最大 token 长度")
+    parser.add_argument("--llm-max-thinking-tokens", type=int, default=None, help="限制 LLM 思考推理的最大 token 长度")
+    
     args = parser.parse_args()
     
     # 1. 确定输入和输出目录
@@ -127,6 +132,14 @@ def main() -> None:
         
     if update_data:
         config.context = config.context.model_copy(update=update_data)
+        
+    # CLI Overrides for max_thinking_tokens
+    vlm_thinking = args.vlm_max_thinking_tokens if args.vlm_max_thinking_tokens is not None else args.max_thinking_tokens
+    llm_thinking = args.llm_max_thinking_tokens if args.llm_max_thinking_tokens is not None else args.max_thinking_tokens
+    if vlm_thinking is not None:
+        config.vlm = config.vlm.model_copy(update={"max_thinking_tokens": vlm_thinking})
+    if llm_thinking is not None:
+        config.llm = config.llm.model_copy(update={"max_thinking_tokens": llm_thinking})
         
     # 保存配置到输出文件夹
     # 2.1 完整 AppConfig dump 到 json (脱敏 api_key)
@@ -214,7 +227,7 @@ def main() -> None:
                 task_val = progress.add_task("[cyan]VLM 分析幻灯片...", total=len(unvalidated))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=config.vlm.max_workers) as pool:
                     futures = {
-                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "analyze", [str(output_dir / c['image']) if not Path(c['image']).is_absolute() else c['image']], config.vlm.supports_parse, config.vlm.supports_response_format, config.vlm.disable_thinking): c
+                        pool.submit(agents.vlm_task, config.vlm.base_url, config.vlm.api_key, config.vlm.model, "analyze", [str(output_dir / c['image']) if not Path(c['image']).is_absolute() else c['image']], config.vlm.supports_parse, config.vlm.supports_response_format, config.vlm.disable_thinking, config.vlm.max_thinking_tokens): c
                         for c in unvalidated
                     }
                     completed = 0
@@ -251,7 +264,7 @@ def main() -> None:
                         config.vlm.base_url, config.vlm.api_key, config.vlm.model, 
                         "dedup", [str(img_a_abs), str(img_b_abs)], 
                         config.vlm.supports_parse, config.vlm.supports_response_format,
-                        config.vlm.disable_thinking
+                        config.vlm.disable_thinking, config.vlm.max_thinking_tokens
                     )
                     return i, is_same, dedup_reasoning, a['image'], b['image']
 
@@ -443,7 +456,8 @@ def main() -> None:
                 max_workers=config.llm.max_workers,
                 cache_dir=cache_dir,
                 progress_hook=lambda: progress.advance(task_proc, 1),
-                disable_thinking=config.llm.disable_thinking
+                disable_thinking=config.llm.disable_thinking,
+                max_thinking_tokens=config.llm.max_thinking_tokens
             )
             _save_json(final_data, final_path)
      

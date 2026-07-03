@@ -28,7 +28,7 @@ class SectionData(BaseModel):
 
 # --- 1. 数据合成 (Data Agent) ---
 
-def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None, disable_thinking: bool = False) -> dict:
+def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> dict:
     """
     通过 LLM 聚合跨模态特征（图像描述、关键词、转录文本）生成结构化 JSON。
     
@@ -39,6 +39,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
         transcript: ASR 转录片段列表。
         context: 会议上下文（标题、议程等）。
         disable_thinking: 是否禁用思考/推理过程。
+        max_thinking_tokens: 限制模型思考推理的最大 token 长度。
         
     Returns:
         dict: 完整的结构化会议数据。
@@ -68,7 +69,8 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
                 model_class=SectionData,
                 supports_parse=supports_parse,
                 supports_response_format=supports_response_format,
-                disable_thinking=disable_thinking
+                disable_thinking=disable_thinking,
+                max_thinking_tokens=max_thinking_tokens
             )
             return parsed.model_dump() if parsed else None
         except Exception as e:

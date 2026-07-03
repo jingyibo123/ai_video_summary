@@ -145,7 +145,7 @@ def extract_key_frames(video_path: str, output_dir: str,
 
 # --- 2. 视觉大模型 (VLM) 代理 ---
 
-def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_class: Any, supports_parse: bool, supports_response_format: bool, disable_thinking: bool = False) -> Tuple[Any, Optional[str]]:
+def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_class: Any, supports_parse: bool, supports_response_format: bool, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> Tuple[Any, Optional[str]]:
     """统一的结构化 LLM 调用封装（支持 .parse / json_schema / Prompt+Regex 三级降级）"""
     kwargs = {"timeout": 600.0}
     if disable_thinking:
@@ -153,7 +153,18 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
             "thinking": {"type": "disabled"},
             "enable_thinking": False
         }
-
+    elif max_thinking_tokens is not None and max_thinking_tokens > 0:
+        kwargs["extra_body"] = {
+            "max_thinking_tokens": max_thinking_tokens,
+            "thinking_budget": max_thinking_tokens,
+            "thinking_token_budget": max_thinking_tokens,
+            "thinking": {
+                "max_thinking_tokens": max_thinking_tokens
+            },
+            "thinking_config": {
+                "max_thinking_tokens": max_thinking_tokens
+            }
+        }
 
     if supports_parse:
         try:
@@ -234,7 +245,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
 
 
 @retry(stop=dynamic_stop, wait=dynamic_wait)
-def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str], supports_parse: bool = True, supports_response_format: bool = True, disable_thinking: bool = False) -> Tuple[Any, Optional[str]]:
+def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str], supports_parse: bool = True, supports_response_format: bool = True, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> Tuple[Any, Optional[str]]:
     """
     多功能 VLM 任务处理器，支持幻灯片校验、去重、摘要生成及热词 OCR。
     
@@ -246,6 +257,7 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         supports_parse: 是否支持原生 .parse() 方法。
         supports_response_format: 是否支持 JSON Schema / JSON Object 结构化输出。
         disable_thinking: 是否禁用思考/推理过程。
+        max_thinking_tokens: 限制模型思考推理的最大 token 长度。
         
     Returns:
         Tuple[Any, Optional[str]]: (提取值, VLM推理过程); 校验/去重返回 bool，摘要返回 str，OCR 返回 List[str]。
@@ -345,7 +357,7 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
         
     model_class, default_val, extractor = task_mapping[task_type]
 
-    parsed, reasoning = structured_llm_call(client, model, [{"role": "user", "content": content}], model_class, supports_parse, supports_response_format, disable_thinking=disable_thinking)
+    parsed, reasoning = structured_llm_call(client, model, [{"role": "user", "content": content}], model_class, supports_parse, supports_response_format, disable_thinking=disable_thinking, max_thinking_tokens=max_thinking_tokens)
     return extractor(parsed), reasoning
 
 

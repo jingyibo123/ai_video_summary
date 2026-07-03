@@ -24,6 +24,7 @@ class VLMConfig(BaseModel):
     supports_response_format: bool = Field(default=True, description="Whether the VLM API supports response_format={'type': 'json_schema'}")
     max_workers: int = Field(default=1, description="Max concurrent workers for VLM API requests")
     disable_thinking: bool = Field(default=False, description="Whether to disable thinking/reasoning process (e.g. for DeepSeek/Qwen APIs)")
+    max_thinking_tokens: Optional[int] = Field(default=None, description="Max thinking/reasoning tokens for VLM")
 
 
 class LLMConfig(BaseModel):
@@ -34,6 +35,7 @@ class LLMConfig(BaseModel):
     supports_response_format: bool = Field(default=True, description="Whether the LLM API supports response_format={'type': 'json_schema'}")
     max_workers: int = Field(default=1, description="Max concurrent workers for LLM API requests")
     disable_thinking: bool = Field(default=False, description="Whether to disable thinking/reasoning process (e.g. for DeepSeek/Qwen APIs)")
+    max_thinking_tokens: Optional[int] = Field(default=None, description="Max thinking/reasoning tokens for LLM")
 
 
 class ASRConfig(BaseModel):
