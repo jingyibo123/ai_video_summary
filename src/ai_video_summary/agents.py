@@ -159,8 +159,9 @@ def extract_key_frames(video_path: str, output_dir: str,
 
     hwaccel = detect_best_hwaccel()
 
-    # 构造 FFmpeg 命令行，流式提取指定 FPS 的低分辨率灰度图并输出 showinfo 日志
-    fps_filter = 1.0 / sample_interval
+    # 构造 FFmpeg 命令行，使用带 I 帧优先和最低时间间隔保护的 select 过滤器，并输出 showinfo 日志
+    min_gap = sample_interval / 2.0
+    select_expr = f"select='isnan(prev_selected_t)+eq(pict_type\\,I)*gte(t-prev_selected_t\\,{min_gap})+gte(t-prev_selected_t\\,{sample_interval})'"
     w, h = target_size
     cmd = ["ffmpeg"]
     if max_seconds:
@@ -169,7 +170,8 @@ def extract_key_frames(video_path: str, output_dir: str,
         cmd.extend(["-hwaccel", hwaccel])
     cmd.extend([
         "-i", str(video_path),
-        "-vf", f"fps={fps_filter},scale={w}:{h},showinfo",
+        "-fps_mode", "passthrough",
+        "-vf", f"{select_expr},scale={w}:{h},showinfo",
         "-f", "rawvideo",
         "-pix_fmt", "gray",
         "pipe:1"
@@ -188,7 +190,10 @@ def extract_key_frames(video_path: str, output_dir: str,
             if "pts_time:" in line_str:
                 match = pts_regex.search(line_str)
                 if match:
-                    timestamps.append(float(match.group(1)))
+                    t_val = float(match.group(1))
+                    timestamps.append(t_val)
+                    if progress_hook:
+                        progress_hook(t_val, total_sec)
                     
     import threading
     stderr_thread = threading.Thread(target=read_stderr)
@@ -219,9 +224,6 @@ def extract_key_frames(video_path: str, output_dir: str,
         gray_bytes = frames[idx]
         sec = timestamps[idx]
         
-        if progress_hook:
-            progress_hook(sec, total_sec)
-            
         gray = np.frombuffer(gray_bytes, dtype=np.uint8).reshape((h, w))
         
         if last_gray is None:
