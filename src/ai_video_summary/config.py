@@ -51,7 +51,7 @@ class ASRConfig(BaseModel):
 class CVConfig(BaseModel):
     diff_threshold: int = Field(default=850, description="MSE threshold for frame difference")
     target_size: Tuple[int, int] = Field(default=(256, 144), description="Image size for comparison")
-
+    sample_interval: float = Field(default=1.0, description="Frame sampling interval in seconds")
 
 class RetryConfig(BaseModel):
     max_attempts: int = Field(default=3, description="Maximum number of retry attempts")

@@ -19,3 +19,4 @@ samples/
 +data/
 +uv.lock
 +.kilo/
+.env

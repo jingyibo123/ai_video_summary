@@ -217,6 +217,7 @@ def main() -> None:
                     max_seconds=max_time,
                     target_size=config.cv.target_size,
                     diff_threshold=config.cv.diff_threshold,
+                    sample_interval=config.cv.sample_interval,
                     progress_hook=_cv_hook
                 )
                 progress.update(task_cv, completed=100, total=100)

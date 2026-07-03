@@ -64,6 +64,7 @@ def extract_key_frames(video_path: str, output_dir: str,
                        max_seconds: Optional[int] = None, 
                        target_size: tuple = (256, 144), 
                        diff_threshold: int = 850,
+                       sample_interval: float = 1.0,
                        progress_hook=None) -> List[dict]:
     """
     极速视频关键帧离析 (Fast CV Slide Extraction).
@@ -74,6 +75,7 @@ def extract_key_frames(video_path: str, output_dir: str,
         max_seconds: 最大处理时长（秒），None 则处理全片。
         target_size: 比较时的缩略图尺寸，建议保持小尺寸以提升速度。
         diff_threshold: 画面差异阈值，MSE 超过此值则认为发生翻页。
+        sample_interval: 采样时间间隔（秒），默认 1.0 秒。
         progress_hook: 回调函数 progress_hook(current_sec, total_sec)。
         
     Returns:
@@ -89,58 +91,146 @@ def extract_key_frames(video_path: str, output_dir: str,
         raise ValueError(f"CV: 无法打开视频文件 {video_path}")
         
     fps = cap.get(cv2.CAP_PROP_FPS)
-    skip_frames = max(1, int(fps))
     total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     total_sec = total_frames / fps if fps > 0 else 0
+    cap.release()
+    
     if max_seconds and total_sec > max_seconds:
         total_sec = max_seconds
-    
-    results = []
-    frame_idx, current_slide_start_sec = 0.0, 0.0
-    last_gray, last_full_frame, last_time_sec = None, None, 0.0
-    
-    def save_current_slide():
-        if last_full_frame is not None:
-            t_str = lambda t: f"{int(t)//3600:02d}-{int(t)%3600//60:02d}-{int(t)%60:02d}"
-            fname = f"{t_str(current_slide_start_sec)}_{t_str(last_time_sec)}.jpg"
-            out_path = cands_dir / fname
-            cv2.imwrite(str(out_path), last_full_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            rel_path = f"candidates/{fname}"
-            results.append({"start_time": current_slide_start_sec, "end_time": last_time_sec, "image": rel_path})
+        
+    logger.info(
+        f"CV: 视频信息 - 总帧数: {int(total_frames)}, FPS: {fps:.2f}, "
+        f"总时长: {total_sec:.2f}s, 采样间隔: {sample_interval}s"
+    )
     
     t_start = time.time()
-    success, frame = cap.read()
     
-    while success:
-        sec = frame_idx / fps
-        if max_seconds and sec > max_seconds: break
-            
-        if progress_hook: progress_hook(sec, total_sec)
+    # 构造 FFmpeg 命令行，流式提取指定 FPS 的低分辨率灰度图并输出 showinfo 日志
+    fps_filter = 1.0 / sample_interval
+    w, h = target_size
+    cmd = [
+        "ffmpeg",
+        "-i", str(video_path),
+        "-vf", f"fps={fps_filter},scale={w}:{h},showinfo",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray",
+        "pipe:1"
+    ]
+    if max_seconds:
+        cmd.insert(1, "-t")
+        cmd.insert(2, str(max_seconds))
         
-        small = cv2.resize(frame, target_size, interpolation=cv2.INTER_NEAREST)
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    # 启动 FFmpeg 子进程，同时读取 stdout (图像字节) 和 stderr (showinfo 打印的 timestamp)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
+    
+    frames = []
+    timestamps = []
+    
+    def read_stderr():
+        pts_regex = re.compile(r"pts_time:([\d\.]+)")
+        for line in proc.stderr:
+            line_str = line.decode("utf-8", errors="ignore")
+            if "pts_time:" in line_str:
+                match = pts_regex.search(line_str)
+                if match:
+                    timestamps.append(float(match.group(1)))
+                    
+    import threading
+    stderr_thread = threading.Thread(target=read_stderr)
+    stderr_thread.start()
+    
+    frame_bytes = w * h
+    while True:
+        data = proc.stdout.read(frame_bytes)
+        if len(data) < frame_bytes:
+            break
+        frames.append(data)
+        
+    proc.stdout.close()
+    proc.wait()
+    stderr_thread.join()
+    
+    n_frames = min(len(frames), len(timestamps))
+    frames = frames[:n_frames]
+    timestamps = timestamps[:n_frames]
+    
+    results = []
+    last_gray = None
+    last_time_sec = 0.0
+    current_slide_start_sec = 0.0
+    slide_intervals = []
+    
+    for idx in range(n_frames):
+        gray_bytes = frames[idx]
+        sec = timestamps[idx]
+        
+        if progress_hook:
+            progress_hook(sec, total_sec)
+            
+        gray = np.frombuffer(gray_bytes, dtype=np.uint8).reshape((h, w))
         
         if last_gray is None:
-            last_gray, last_full_frame, last_time_sec = gray, frame.copy(), sec
+            last_gray = gray
+            last_time_sec = sec
+            current_slide_start_sec = sec
         else:
             mse = np.sum((last_gray.astype("float") - gray.astype("float")) ** 2) / float(gray.size)
             if mse > diff_threshold:
-                save_current_slide()
+                slide_intervals.append((current_slide_start_sec, last_time_sec))
                 current_slide_start_sec = sec
-            last_gray, last_full_frame, last_time_sec = gray, frame.copy(), sec
+            last_gray = gray
+            last_time_sec = sec
             
-        frame_idx += skip_frames
-        for _ in range(skip_frames - 1):
-            if not cap.grab(): success = False; break
-        if not success: break
-        success, frame = cap.read()
+    if n_frames > 0:
+        slide_intervals.append((current_slide_start_sec, last_time_sec))
         
-    save_current_slide()
-    if progress_hook: progress_hook(total_sec, total_sec)
+    # 延迟高清截帧提取函数
+    def extract_single_frame(v_path: str, t_sec: float, o_path: Path):
+        cmd_extract = [
+            "ffmpeg",
+            "-y",
+            "-ss", f"{t_sec:.3f}",
+            "-i", str(v_path),
+            "-vframes", "1",
+            "-q:v", "2",
+            str(o_path)
+        ]
+        subprocess.run(cmd_extract, capture_output=True, check=True)
         
-    cap.release()
+    for start_sec, end_sec in slide_intervals:
+        t_str = lambda t: f"{int(t)//3600:02d}-{int(t)%3600//60:02d}-{int(t)%60:02d}"
+        fname = f"{t_str(start_sec)}_{t_str(end_sec)}.jpg"
+        out_path = cands_dir / fname
+        
+        try:
+            extract_single_frame(video_path, end_sec, out_path)
+        except Exception as e:
+            logger.warning(f"CV: 无法提取高清帧于 {end_sec}s: {e}")
+            try:
+                extract_single_frame(video_path, start_sec, out_path)
+            except Exception as e2:
+                logger.error(f"CV: 彻底无法提取高清帧于 {start_sec}s: {e2}")
+                continue
+                
+        rel_path = f"candidates/{fname}"
+        results.append({"start_time": start_sec, "end_time": end_sec, "image": rel_path})
+        
+    if progress_hook:
+        progress_hook(total_sec, total_sec)
+        
     elapsed = time.time() - t_start
-    logger.info(f"CV: 处理完成，共切分 {len(results)} 个候选帧，速率 { (max_seconds or last_time_sec)/elapsed:.1f}x")
+    real_time_ratio = (max_seconds or last_time_sec) / elapsed if elapsed > 0 else 0
+    fps_speed = n_frames / elapsed if elapsed > 0 else 0
+    logger.info(
+        f"CV: 处理完成！\n"
+        f"  - 视频总时长: {total_sec:.2f}s\n"
+        f"  - 视频总帧数: {int(total_frames)}\n"
+        f"  - 采样分析帧数: {n_frames}\n"
+        f"  - 耗时: {elapsed:.2f}s\n"
+        f"  - 速率: {real_time_ratio:.1f}x (相当于每秒处理视频 {real_time_ratio:.1f} 秒)\n"
+        f"  - 帧率处理速度: {fps_speed:.2f} 帧/秒 (FPS)\n"
+        f"  - 留下来(候选帧)数: {len(results)}"
+    )
     return results
 
 # --- 2. 视觉大模型 (VLM) 代理 ---
