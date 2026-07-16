@@ -22,6 +22,30 @@ from tenacity import retry
 from loguru import logger
 from .config import dynamic_stop, dynamic_wait
 
+def run_subprocess(cmd: List[Any], **kwargs) -> subprocess.CompletedProcess:
+    """Wrapper for subprocess.run that captures and exposes stderr on failure."""
+    check = kwargs.pop("check", True)
+    cmd_str = [str(x) for x in cmd]
+    
+    # If not explicitly redirecting, capture output to get stderr
+    if "stdout" not in kwargs and "stderr" not in kwargs and "capture_output" not in kwargs:
+        kwargs["capture_output"] = True
+        
+    try:
+        res = subprocess.run(cmd_str, **kwargs)
+        if check and res.returncode != 0:
+            stderr_out = res.stderr
+            if isinstance(stderr_out, bytes):
+                stderr_out = stderr_out.decode('utf-8', errors='ignore')
+            elif stderr_out is None:
+                stderr_out = "<no stderr captured>"
+            raise RuntimeError(f"Command failed (code {res.returncode}): {' '.join(cmd_str)}\nDetails: {stderr_out}")
+        return res
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise
+        raise RuntimeError(f"Failed to execute {' '.join(cmd_str)}: {e}")
+
 # --- OpenAI Client Cache for Connection Reuse ---
 _client_cache = {}
 
@@ -60,7 +84,7 @@ class SlideAnalysis(BaseModel):
 
 # --- 1. 计算机视觉 (CV) 代理 ---
 
-def extract_key_frames(video_path: str, output_dir: str, 
+def extract_key_frames(video_path: Path, output_dir: Path, 
                        max_seconds: Optional[int] = None, 
                        target_size: tuple = (256, 144), 
                        diff_threshold: int = 850,
@@ -82,8 +106,7 @@ def extract_key_frames(video_path: str, output_dir: str,
         List[dict]: 包含 'start_time', 'end_time', 'image' 的列表。
     """
     logger.info(f"CV: 开始分析视频流 {video_path}")
-    output_dir_path = Path(output_dir)
-    cands_dir = output_dir_path / "candidates"
+    cands_dir = output_dir / "candidates"
     cands_dir.mkdir(parents=True, exist_ok=True)
     
     cap = cv2.VideoCapture(str(video_path))
@@ -134,7 +157,7 @@ def extract_key_frames(video_path: str, output_dir: str,
             cmd_test = [
                 "ffmpeg", "-y",
                 "-hwaccel", hw,
-                "-i", str(video_path),
+                "-i", video_path,
                 "-t", "0.5",
                 "-vf", f"fps=1.0,scale={target_size[0]}:{target_size[1]}",
                 "-f", "rawvideo",
@@ -143,7 +166,7 @@ def extract_key_frames(video_path: str, output_dir: str,
             ]
             try:
                 test_res = subprocess.run(
-                    cmd_test,
+                    [str(x) for x in cmd_test],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5
@@ -169,7 +192,7 @@ def extract_key_frames(video_path: str, output_dir: str,
     if hwaccel != "cpu":
         cmd.extend(["-hwaccel", hwaccel])
     cmd.extend([
-        "-i", str(video_path),
+        "-i", video_path,
         "-fps_mode", "passthrough",
         "-vf", f"{select_expr},scale={w}:{h},showinfo",
         "-f", "rawvideo",
@@ -178,7 +201,7 @@ def extract_key_frames(video_path: str, output_dir: str,
     ])
         
     # 启动 FFmpeg 子进程，同时读取 stdout (图像字节) 和 stderr (showinfo 打印的 timestamp)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
+    proc = subprocess.Popen([str(x) for x in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
     
     frames = []
     timestamps = []
@@ -242,17 +265,17 @@ def extract_key_frames(video_path: str, output_dir: str,
         slide_intervals.append((current_slide_start_sec, last_time_sec))
         
     # 延迟高清截帧提取函数
-    def extract_single_frame(v_path: str, t_sec: float, o_path: Path):
+    def extract_single_frame(v_path: Path, t_sec: float, o_path: Path):
         cmd_extract = [
             "ffmpeg",
             "-y",
             "-ss", f"{t_sec:.3f}",
-            "-i", str(v_path),
+            "-i", v_path,
             "-vframes", "1",
             "-q:v", "2",
-            str(o_path)
+            o_path
         ]
-        subprocess.run(cmd_extract, capture_output=True, check=True)
+        run_subprocess(cmd_extract)
         
     for start_sec, end_sec in slide_intervals:
         t_str = lambda t: f"{int(t)//3600:02d}-{int(t)%3600//60:02d}-{int(t)%60:02d}"
@@ -392,7 +415,7 @@ def structured_llm_call(client: OpenAI, model: str, messages: List[dict], model_
 
 
 @retry(stop=dynamic_stop, wait=dynamic_wait)
-def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[str], supports_parse: bool = True, supports_response_format: bool = True, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> Tuple[Any, Optional[str]]:
+def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: List[Path], supports_parse: bool = True, supports_response_format: bool = True, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> Tuple[Any, Optional[str]]:
     """
     多功能 VLM 任务处理器，支持幻灯片校验、去重、摘要生成及热词 OCR。
     
@@ -482,7 +505,7 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
     }
     content = [{"type": "text", "text": prompts.get(task_type, task_type)}]
     for img in images:
-        frame = cv2.imread(img)
+        frame = cv2.imread(str(img))
         h, w = frame.shape[:2]
         if max(h, w) > 640:
             scale = 640 / max(h, w)
@@ -511,7 +534,7 @@ def vlm_task(base_url: str, api_key: str, model: str, task_type: str, images: Li
 # --- 3. 语音转录 (ASR) 代理 ---
 
 @retry(stop=dynamic_stop, wait=dynamic_wait)
-def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_base: str, api_key: str, hotwords: Optional[str]) -> List[dict]:
+def _transcribe_single_file(audio_path: Path, prompt: str, model_size: str, api_base: str, api_key: str, hotwords: Optional[str]) -> List[dict]:
     client = get_openai_client(api_key, api_base)
     extra_body = {}
     if hotwords:
@@ -519,9 +542,8 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
         extra_body["hot_words"] = hotwords
     resp = None
     formats_to_try = ["verbose_json", "json", "text"]
-    audio_path_obj = Path(audio_path)
     for fmt in formats_to_try:
-        with audio_path_obj.open("rb") as f:
+        with audio_path.open("rb") as f:
             try:
                 logger.info(f"ASR trying response_format='{fmt}' for model '{model_size}'")
                 resp = client.audio.transcriptions.create(
@@ -572,10 +594,10 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
             combined.append(item)
 
     try:
-        size_bytes = audio_path_obj.stat().st_size
-        if audio_path_obj.suffix.lower() == ".mp3":
+        size_bytes = audio_path.stat().st_size
+        if audio_path.suffix.lower() == ".mp3":
             duration = size_bytes * 8 / 64000
-        elif audio_path_obj.suffix.lower() == ".wav":
+        elif audio_path.suffix.lower() == ".wav":
             duration = size_bytes / 32000
         else:
             duration = 1680.0
@@ -597,41 +619,40 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
     logger.info(f"ASR simulated {len(result)} segments from '{text[:80]}...' (plain text fallback, duration={duration:.1f}s)")
     return result
 
-def split_audio(audio_path: str, chunk_length_s: int) -> List[str]:
+def split_audio(audio_path: Path, chunk_length_s: int) -> List[Path]:
     """
     使用 FFmpeg 将长音频分割为多个等长切片，用于规避 ASR API 的限制。
     返回切片 file path 列表。
     """
-    audio_path_obj = Path(audio_path)
-    output_dir = audio_path_obj.parent
-    base_name = audio_path_obj.stem
-    suffix = audio_path_obj.suffix
+    output_dir = audio_path.parent
+    base_name = audio_path.stem
+    suffix = audio_path.suffix
     out_pattern = output_dir / f"{base_name}_chunk_%03d{suffix}"
     
     cmd_probe = [
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path_obj)
+        "-of", "default=noprint_wrappers=1:nokey=1", audio_path
     ]
     try:
-        duration_str = subprocess.check_output(cmd_probe, timeout=10).decode('utf-8').strip()
-        duration = float(duration_str)
+        res = run_subprocess(cmd_probe, capture_output=True, text=True)
+        duration = float(res.stdout.strip())
     except Exception as e:
         logger.warning(f"ASR chunking: 无法获取音频时长: {e}")
         duration = 0.0
         
-    if duration > 0 and duration <= chunk_length_s + 5:
-        return [str(audio_path_obj)]
+    if 0 < duration <= chunk_length_s + 5:
+        return [audio_path]
         
     logger.info(f"ASR chunking: 音频时长 {duration:.1f}s 超过 {chunk_length_s}s，使用 FFmpeg 切片...")
     
     cmd_split = [
-        "ffmpeg", "-i", str(audio_path_obj), "-f", "segment", 
-        "-segment_time", str(chunk_length_s), "-c", "copy", "-y", str(out_pattern)
+        "ffmpeg", "-i", audio_path, "-f", "segment", 
+        "-segment_time", str(chunk_length_s), "-c", "copy", "-y", out_pattern
     ]
-    subprocess.run(cmd_split, capture_output=True)
+    run_subprocess(cmd_split)
     
-    chunks = sorted([str(f) for f in output_dir.iterdir() if f.name.startswith(f"{base_name}_chunk_") and f.name.endswith(suffix)])
-    return chunks if chunks else [str(audio_path_obj)]
+    chunks = sorted([f for f in output_dir.iterdir() if f.name.startswith(f"{base_name}_chunk_") and f.name.endswith(suffix)])
+    return chunks if chunks else [audio_path]
 
 @retry(stop=dynamic_stop, wait=dynamic_wait)
 def filter_asr_hotwords(base_url: str, api_key: str, model: str, terms: List[str], agenda: List[str], title: str) -> List[str]:
@@ -723,7 +744,7 @@ def infer_from_filename(stem: str, base_url: str, api_key: str, model: str, supp
     return date, title
 
 def transcribe_with_whisper(
-    audio_path: str, 
+    audio_path: Path, 
     prompt: str, 
     model_size: str = "base", 
     api_base: Optional[str] = None, 
@@ -732,10 +753,10 @@ def transcribe_with_whisper(
     compute_type: str = "int8", 
     hotwords: Optional[str] = None, 
     chunk_length_s: int = 900, 
-    cache_dir: Optional[str] = None, 
+    cache_dir: Optional[Path] = None, 
     progress_hook=None,
     max_workers: int = 4,
-    chunks: Optional[List[str]] = None
+    chunks: Optional[List[Path]] = None
 ) -> List[dict]:
     """
     核心语音转录引擎，根据 api_base 自动分发至本地 Faster-Whisper 或远程 API。
@@ -758,18 +779,15 @@ def transcribe_with_whisper(
         List[dict]: 包含 'start', 'end', 'text', 'speaker' 的分段列表。
     """
     import json
-    audio_path_obj = Path(audio_path)
-    cache_dir_obj = Path(cache_dir) if cache_dir else None
     if api_base:
         if chunks is None:
-            chunks = split_audio(str(audio_path_obj), chunk_length_s)
+            chunks = split_audio(audio_path, chunk_length_s)
         all_segments = []
         
-        def _process_chunk(i: int, chunk_path: str) -> List[dict]:
-            chunk_path_obj = Path(chunk_path)
+        def _process_chunk(i: int, chunk_path: Path) -> List[dict]:
             chunk_cache_file = None
-            if cache_dir_obj:
-                chunk_cache_file = cache_dir_obj / f"{chunk_path_obj.stem}.json"
+            if cache_dir:
+                chunk_cache_file = cache_dir / f"{chunk_path.stem}.json"
                 
             if chunk_cache_file and chunk_cache_file.exists():
                 try:
@@ -780,11 +798,11 @@ def transcribe_with_whisper(
                 except Exception:
                     pass
 
-            logger.info(f"ASR: 开始转录分片 {i+1}/{len(chunks)} ({chunk_path_obj.name})...")
+            logger.info(f"ASR: 开始转录分片 {i+1}/{len(chunks)} ({chunk_path.name})...")
             
             offset = i * chunk_length_s
             chunk_segments = _transcribe_single_file(
-                str(chunk_path_obj), prompt, model_size, api_base, api_key, hotwords
+                chunk_path, prompt, model_size, api_base, api_key, hotwords
             )
             
             for seg in chunk_segments:
@@ -813,10 +831,10 @@ def transcribe_with_whisper(
     else:
         from faster_whisper import WhisperModel
         model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        segments, _ = model.transcribe(str(audio_path_obj), language="zh", initial_prompt=prompt, vad_filter=True)
+        segments, _ = model.transcribe(str(audio_path), language="zh", initial_prompt=prompt, vad_filter=True)
         return [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip(), "speaker": "讲者"} for s in segments]
 
-def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] = None) -> None:
+def extract_audio(video_path: Path, output_path: Path, max_seconds: Optional[int] = None) -> None:
     """
     使用 FFmpeg 提取 16k 单声道 PCM 音频。
     
@@ -825,19 +843,12 @@ def extract_audio(video_path: str, output_path: str, max_seconds: Optional[int] 
         output_path: 输出 Wav 路径。
         max_seconds: 提取的最大时长（秒）。
     """
-    video_path_obj = Path(video_path)
-    output_path_obj = Path(output_path)
-    if output_path_obj.exists(): return
-    cmd = ["ffmpeg", "-i", str(video_path_obj), "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", str(output_path_obj)]
+    if output_path.exists(): return
+    cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", output_path]
     if max_seconds: cmd.insert(-1, "-t"); cmd.insert(-1, str(max_seconds))
-    try:
-        subprocess.run(cmd, capture_output=True, check=True)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg failed to extract audio: {e.stderr.decode('utf-8', errors='ignore')}")
-        raise RuntimeError(f"FFmpeg extract_audio failed: {e}")
+    run_subprocess(cmd)
 
-
-def has_audio_track(video_path: str) -> bool:
+def has_audio_track(video_path: Path) -> bool:
     """
     使用 ffprobe 检查视频文件是否包含音频轨。
     """
@@ -845,10 +856,10 @@ def has_audio_track(video_path: str) -> bool:
         "ffprobe", "-v", "error", "-select_streams", "a",
         "-show_entries", "stream=codec_type",
         "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path)
+        video_path
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = run_subprocess(cmd, capture_output=True, text=True, check=True)
         return "audio" in res.stdout.lower()
     except Exception as e:
         logger.warning(f"ffprobe 检测音频轨失败: {e}")

@@ -171,6 +171,7 @@ def process_video(
         sys.executable, "-m", "ai_video_summary.main",
         "--video", str(video_path),
         "--output", str(output_dir),
+        "--no-progress",
         *extra_args,
     ]
 

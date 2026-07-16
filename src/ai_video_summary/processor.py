@@ -28,7 +28,7 @@ class SectionData(BaseModel):
 
 # --- 1. 数据合成 (Data Agent) ---
 
-def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[str] = None, progress_hook: Optional[Callable] = None, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> dict:
+def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict], transcript: List[dict], context: dict, supports_parse: bool = True, supports_response_format: bool = True, max_workers: int = 2, cache_dir: Optional[Path] = None, progress_hook: Optional[Callable] = None, disable_thinking: bool = False, max_thinking_tokens: Optional[int] = None) -> dict:
     """
     通过 LLM 聚合跨模态特征（图像描述、关键词、转录文本）生成结构化 JSON。
     
@@ -38,6 +38,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
         slides: 经过 VLM 验证和增强的幻灯片列表。
         transcript: ASR 转录片段列表。
         context: 会议上下文（标题、议程等）。
+        cache_dir: 用于缓存断点续传的目录路径。
         disable_thinking: 是否禁用思考/推理过程。
         max_thinking_tokens: 限制模型思考推理的最大 token 长度。
         
@@ -78,8 +79,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
             raise
 
     def _process_one(i: int, s: dict) -> dict:
-        cache_dir_path = Path(cache_dir) if cache_dir else None
-        cache_file = cache_dir_path / f"section_{i}.json" if cache_dir_path else None
+        cache_file = cache_dir / f"section_{i}.json" if cache_dir else None
         if cache_file and cache_file.exists():
             try:
                 with cache_file.open('r', encoding='utf-8') as f:
@@ -118,7 +118,7 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
 
 # --- 2. Markdown 渲染 (Markdown Agent) ---
 
-def render_minutes(data: dict, out_path: str | Path) -> None:
+def render_minutes(data: dict, out_path: Path) -> None:
     """
     将结构化数据渲染为 Format A: 时间轴驱动的实录纪要。
     
@@ -147,10 +147,9 @@ def render_minutes(data: dict, out_path: str | Path) -> None:
             else:
                 lines[-1] += f" {seg['text']}"
     
-    out_path_obj = Path(out_path)
-    with out_path_obj.open('w', encoding='utf-8') as f: f.write("\n".join(lines))
+    with out_path.open('w', encoding='utf-8') as f: f.write("\n".join(lines))
 
-def render_blog(data: dict, out_path: str | Path) -> None:
+def render_blog(data: dict, out_path: Path) -> None:
     """
     将结构化数据渲染为 Format B: 叙事风格的技术博客。
     
@@ -168,5 +167,4 @@ def render_blog(data: dict, out_path: str | Path) -> None:
         lines.append(f"![{sec['image_caption']}]({sec['image_path']})\n> {sec['image_caption']}")
         lines.append(f"\n{sec['blog_text']}")
         
-    out_path_obj = Path(out_path)
-    with out_path_obj.open('w', encoding='utf-8') as f: f.write("\n".join(lines))
+    with out_path.open('w', encoding='utf-8') as f: f.write("\n".join(lines))
