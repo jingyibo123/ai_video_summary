@@ -94,19 +94,9 @@ def build_final_json(base_url: str, api_key: str, model: str, slides: List[dict]
         if len(speech) > 4000: speech = speech[:4000] + "..."
         user_info = f"时间: {s['start_time']}s-{s['end_time']}s\n画面: {s.get('description','')}\n原音: {speech or '无语音'}"
         
-        try:
-            node = call_llm(user_info)
-        except Exception as e:
-            logger.error(f"Structured content generation failed: {e}")
-            node = None
-            
+        node = call_llm(user_info)
         if not node:
-            node = SectionData(
-                agenda_topic="讲座内容", 
-                section_title=f"分享 {i+1}", 
-                image_caption=s.get('description','图片'), 
-                blog_text=speech or "无内容"
-            ).model_dump()
+            raise ValueError(f"LLM returned empty structured content for slide {i+1}")
             
         node.update({"slide_index": i+1, "image_path": s["image"], "start_time": s["start_time"], "end_time": s["end_time"], 
                      "minutes_content": [seg for seg in transcript if seg["start"] < s["end_time"] and seg["end"] > s["start_time"]]})

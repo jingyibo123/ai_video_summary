@@ -545,9 +545,19 @@ def _transcribe_single_file(audio_path: str, prompt: str, model_size: str, api_b
     raw = getattr(resp, "segments", [])
     if raw:
         logger.info(f"ASR parsed {len(raw)} segments from 'segments' field")
-        return [{"start": round(float(s["start"]), 2), "end": round(float(s["end"]), 2), "text": s["text"].strip(), "speaker": "讲者"} for s in raw]
+        segments_out = []
+        for s in raw:
+            start = s.get("start", 0.0) if isinstance(s, dict) else getattr(s, "start", 0.0)
+            end = s.get("end", 0.0) if isinstance(s, dict) else getattr(s, "end", 0.0)
+            text_val = s.get("text", "") if isinstance(s, dict) else getattr(s, "text", "")
+            segments_out.append({"start": round(float(start), 2), "end": round(float(end), 2), "text": text_val.strip(), "speaker": "讲者"})
+        return segments_out
 
-    text = getattr(resp, "text", "")
+    if isinstance(resp, str):
+        text = resp
+    else:
+        text = getattr(resp, "text", "")
+        
     if not text:
         logger.warning(f"ASR response has neither 'segments' nor 'text'. Raw attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
 
