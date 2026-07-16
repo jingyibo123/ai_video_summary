@@ -88,7 +88,7 @@ def extract_key_frames(video_path: Path, output_dir: Path,
                        max_seconds: Optional[int] = None, 
                        target_size: tuple = (256, 144), 
                        diff_threshold: int = 850,
-                       sample_interval: float = 1.0,
+                       sample_interval: float = 0.5,
                        progress_hook=None) -> List[dict]:
     """
     极速视频关键帧离析 (Fast CV Slide Extraction).
@@ -182,60 +182,73 @@ def extract_key_frames(video_path: Path, output_dir: Path,
 
     hwaccel = detect_best_hwaccel()
 
-    # 构造 FFmpeg 命令行，使用带 I 帧优先和最低时间间隔保护的 select 过滤器，并输出 showinfo 日志
-    min_gap = sample_interval / 2.0
-    select_expr = f"select='isnan(prev_selected_t)+eq(pict_type\\,I)*gte(t-prev_selected_t\\,{min_gap})+gte(t-prev_selected_t\\,{sample_interval})'"
+    # --- 方法3：FFmpeg 智能关键帧提取（代码保留） ---
+    # min_gap = sample_interval / 2.0
+    # select_expr = f"select='isnan(prev_selected_t)+eq(pict_type\\,I)*gte(t-prev_selected_t\\,{min_gap})+gte(t-prev_selected_t\\,{sample_interval})'"
     w, h = target_size
     cmd = ["ffmpeg"]
     if max_seconds:
         cmd.extend(["-t", str(max_seconds)])
     if hwaccel != "cpu":
         cmd.extend(["-hwaccel", hwaccel])
+        
+    # cmd.extend([
+    #     "-i", video_path,
+    #     "-fps_mode", "passthrough",
+    #     "-vf", f"{select_expr},scale={w}:{h},showinfo",
+    #     "-f", "rawvideo",
+    #     "-pix_fmt", "gray",
+    #     "pipe:1"
+    # ])
+    
+    # --- 方法2：FFmpeg 固定周期抽帧 ---
     cmd.extend([
         "-i", video_path,
-        "-fps_mode", "passthrough",
-        "-vf", f"{select_expr},scale={w}:{h},showinfo",
+        "-vf", f"fps=1/{sample_interval},scale={w}:{h}",
         "-f", "rawvideo",
         "-pix_fmt", "gray",
         "pipe:1"
     ])
         
-    # 启动 FFmpeg 子进程，同时读取 stdout (图像字节) 和 stderr (showinfo 打印的 timestamp)
-    proc = subprocess.Popen([str(x) for x in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
+    # 启动 FFmpeg 子进程
+    proc = subprocess.Popen([str(x) for x in cmd], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**6)
     
     frames = []
-    timestamps = []
-    
-    def read_stderr():
-        pts_regex = re.compile(r"pts_time:([\d\.]+)")
-        for line in proc.stderr:
-            line_str = line.decode("utf-8", errors="ignore")
-            if "pts_time:" in line_str:
-                match = pts_regex.search(line_str)
-                if match:
-                    t_val = float(match.group(1))
-                    timestamps.append(t_val)
-                    if progress_hook:
-                        progress_hook(t_val, total_sec)
-                    
-    import threading
-    stderr_thread = threading.Thread(target=read_stderr)
-    stderr_thread.start()
-    
     frame_bytes = w * h
+    
+    # --- 方法3 的 stderr 时间戳解析线程（已注释） ---
+    # timestamps = []
+    # def read_stderr():
+    #     pts_regex = re.compile(r"pts_time:([\d\.]+)")
+    #     for line in proc.stderr:
+    #         line_str = line.decode("utf-8", errors="ignore")
+    #         if "pts_time:" in line_str:
+    #             match = pts_regex.search(line_str)
+    #             if match:
+    #                 t_val = float(match.group(1))
+    #                 timestamps.append(t_val)
+    #                 if progress_hook:
+    #                     progress_hook(t_val, total_sec)
+    # import threading
+    # stderr_thread = threading.Thread(target=read_stderr)
+    # stderr_thread.start()
+    
+    idx = 0
     while True:
         data = proc.stdout.read(frame_bytes)
         if len(data) < frame_bytes:
             break
         frames.append(data)
+        if progress_hook:
+            sec = idx * sample_interval
+            progress_hook(sec, total_sec)
+        idx += 1
         
     proc.stdout.close()
     proc.wait()
-    stderr_thread.join()
+    # stderr_thread.join()
     
-    n_frames = min(len(frames), len(timestamps))
-    frames = frames[:n_frames]
-    timestamps = timestamps[:n_frames]
+    n_frames = len(frames)
     
     results = []
     last_gray = None
@@ -245,7 +258,7 @@ def extract_key_frames(video_path: Path, output_dir: Path,
     
     for idx in range(n_frames):
         gray_bytes = frames[idx]
-        sec = timestamps[idx]
+        sec = idx * sample_interval
         
         gray = np.frombuffer(gray_bytes, dtype=np.uint8).reshape((h, w))
         
