@@ -319,7 +319,9 @@ if __name__ == "__main__":
         
     video_path = sys.argv[1]
     backend = sys.argv[2] if len(sys.argv) > 2 else "all"
-    output_dir = "cv_benchmark_output"
+    
+    # 明确将输出目录设置在当前 py 文件同级的 cv_benchmark_output 文件夹内
+    output_dir = str(Path(__file__).parent / "cv_benchmark_output")
     max_sec = 60  # 为加快测试，只处理前60秒
     
     if Path(output_dir).exists():
@@ -339,6 +341,14 @@ if __name__ == "__main__":
         try:
             res = func(video_path, output_dir, max_seconds=max_sec)
             all_results[name] = len(res)
+            
+            # 把结果存下来到本地供检查
+            safe_name = name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+            res_file = Path(output_dir) / f"{safe_name}_results.json"
+            with open(res_file, "w", encoding="utf-8") as f:
+                json.dump(res, f, ensure_ascii=False, indent=2)
+            print(f"[{name}] 结果已保存至: {res_file}")
+            
         except Exception as e:
             print(f"{name} 失败: {e}")
             all_results[name] = "Failed"
